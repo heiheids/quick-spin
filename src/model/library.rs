@@ -44,7 +44,8 @@ impl Library {
     ) -> Vec<usize> {
         let needle = query.trim().to_lowercase();
 
-        self.all
+        let mut items: Vec<usize> = self
+            .all
             .iter()
             .enumerate()
             .filter(|(_, s)| {
@@ -71,7 +72,26 @@ impl Library {
                     || alias.to_lowercase().contains(&needle)
             })
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+
+        // 排序键：**无 order 的算 0（排在前面），有 order 的算 1（排在后面）**，
+        // 第二维才是 order 数值本身。
+        //
+        // `sort_by_key` 是稳定排序，所以"无 order"的那批仍然保持扫描顺序，
+        // 不会因为这里加了排序就把用户现有的排列打乱。
+        //
+        // 为什么让有 order 的排在后面而不是直接按数值排：新条目取
+        // "现有最大值 + 1"，若把无 order 的当作 0 参与比较，第一个新条目
+        // 的 1 会插到所有老条目**前面**去。分成两档才能保证"新加的永远在末尾"。
+        items.sort_by_key(|&i| {
+            let ov = overrides.get(&path_key(&self.all[i]));
+            match ov.and_then(|o| o.order) {
+                None => (0u8, 0u32),
+                Some(n) => (1u8, n),
+            }
+        });
+
+        items
     }
 
     /// 某个选项卡下的条目数。侧栏"有内容时无法删除"用它判断。

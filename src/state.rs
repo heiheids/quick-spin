@@ -41,6 +41,20 @@ pub struct EntryOverride {
     /// 归属的选项卡键（"移动到"）。`None` 表示跟来源走。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// 显示顺序。`None` 表示"从未被排过序"。
+    ///
+    /// 排序规则（见 `Library::view`）：**没有 `order` 的按扫描顺序排在前面，
+    /// 有 `order` 的按数值升序排在后面**。
+    ///
+    /// 这样定是为了同时满足两件事：
+    /// 1. 新添加的条目取"现有最大值 + 1"，于是天然落在末尾 —— 用户加进来的
+    ///    东西总在最后，不会插进已有的排列里；
+    /// 2. 用户第一次拖动排序时，程序会把当时**全部**条目的顺序落成显式数值
+    ///    （见 `App::materialize_order`），此后顺序就完全由这张表决定，
+    ///    不再依赖扫描顺序 —— 否则拖动一个"没有 order"的条目会把它甩到最后，
+    ///    而不是落到用户松手的那个位置。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
 }
 
 impl EntryOverride {

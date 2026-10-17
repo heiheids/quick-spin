@@ -780,10 +780,72 @@ impl App {
 
     /// 采纳扫描结果。
     fn adopt_scan(&mut self, report: ScanReport) {
+        // 先记下"这一批之前就已存在的条目"，用来分辨哪些是**真正新加的**。
+        // 必须在替换 `library` 之前取，否则新旧分不出来。
+        let before: std::collections::HashSet<String> = (0..self.library.total())
+            .filter_map(|i| self.library.get(i))
+            .map(crate::model::library::path_key)
+            .collect();
+
         self.library = Library::new(report.items);
+        self.assign_new_order(&before);
         self.prune_overrides();
         self.normalize_groups();
         self.refresh_view();
+    }
+
+    /// 给本次**新加**的条目排到末尾。
+    ///
+    /// 只动"不在 `before` 里、且还没有 order"的条目 —— 老条目一律不碰，
+    /// 这样它们保持"无 order"状态，按 `Library::view` 的规则继续按扫描顺序
+    /// 显示，用户现有的排列不会因为加了一个新快捷方式就被打乱。
+    ///
+    /// 新条目取"现有最大值 + 1"，于是天然落在末尾（需求："新快捷方式自动放到末尾"）。
+    fn assign_new_order(&mut self, before: &std::collections::HashSet<String>) {
+        // **首次扫描必须直接返回。**
+        //
+        // 程序启动时 `library` 是空的，第一次 `adopt_scan` 的 `before` 必然是空集，
+        // 于是全部条目都会被判成"新加的"、统统写上序号 —— 实测会把 `state.toml`
+        // 从 1288 字节撑到 2045 字节（18 条全被物化）。视觉顺序虽然没变，
+        // 但状态文件被无谓撑大，且"只给新条目排序"的语义也丢了。
+        //
+        // 空库时也确实不需要排序：没有"老条目"可比，谁先谁后都一样。
+        if before.is_empty() {
+            return;
+        }
+
+        let mut max = self
+            .state
+            .get()
+            .entries
+            .values()
+            .filter_map(|o| o.order)
+            .max()
+            .unwrap_or(0);
+
+        let mut changed = false;
+        for i in 0..self.library.total() {
+            let Some(s) = self.library.get(i) else {
+                continue;
+            };
+            let key = crate::model::library::path_key(s);
+            if before.contains(&key) {
+                continue; // 老条目，不动
+            }
+            let mut ov = self.state.get().entry(&key);
+            if ov.order.is_some() {
+                continue; // 已经有位置了（例如拖过一次），别覆盖用户排的序
+            }
+            max += 1;
+            ov.order = Some(max);
+            self.state.get_mut().set_entry(&key, ov);
+            changed = true;
+        }
+        if changed {
+            if let Err(e) = self.state.save() {
+                eprintln!("保存新条目顺序失败: {e}");
+            }
+        }
     }
 
     /// 清掉覆盖表里"指向已不存在的条目"的记录。
