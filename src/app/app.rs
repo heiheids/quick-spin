@@ -143,6 +143,16 @@ struct TileDrag {
     /// 必须等鼠标移动超过阈值才算真的进入拖拽，
     /// 否则每一次点击启动都会顺带被当成拖拽。
     active: bool,
+    /// 拖拽期间鼠标所指的**插入位置**（可见条目下标，`0..=visible.len()`）。
+    ///
+    /// 与 `tile_drop`（选项卡落点）互斥：鼠标要么在侧栏选项卡上（那是改分组），
+    /// 要么在网格里（那是改排序），不可能同时成立，所以两者一起算一次就好。
+    /// `None` = 当前两者都不是，松手时什么都不做。
+    ///
+    /// 存**下标**而不是"目标条目的键"：插入位置本来就是"第几道缝"，
+    /// 用键去表达还得区分"插在它前面还是后面"，反而多一层换算。
+    /// 排序在松手时一次性完成，中途视图不会重排，下标不存在漂移问题。
+    over_index: Option<usize>,
 }
 
 /// 方格拖拽的启动阈值（逻辑像素）。与侧栏选项卡排序用的是同一个量级。
@@ -846,6 +856,83 @@ impl App {
                 eprintln!("保存新条目顺序失败: {e}");
             }
         }
+    }
+
+    /// 把 `key` 挪到当前选项卡里的第 `slot` 道缝（可见条目下标，
+    /// 由 [`Layout::drop_slot_at`] 算出）。
+    ///
+    /// ## 为什么必须先物化整张表
+    ///
+    /// 排序规则是"**有 order 的排在无 order 的后面**"（见 `Library::view`）。
+    /// 所以只给被拖的那一条写序号的话，它会直接甩到末尾，而不是落到用户松手的
+    /// 位置 —— 往第一个格子前面拖，结果跑到最后一格，看起来就像功能坏了。
+    /// 因此这里先把当前选项卡内**全部**条目的先后落成显式序号，再挪那一条。
+    ///
+    /// 物化只覆盖**当前选项卡**：`Library::view` 先按选项卡过滤再排序，
+    /// 不同选项卡的序号永远不参与同一次比较，各自独立编号是安全的。
+    /// 顺带的好处是"动一个图标"不会把别的选项卡也写进状态文件。
+    ///
+    /// 基准视图用**不带搜索词**的那一份：搜索时可见集合只是它的一个子序列，
+    /// 若拿搜索结果去编号，没被搜到的条目会继续保持"无序号"，
+    /// 于是清空搜索框的那一刻它们整体跳到最前面 —— 看起来像排列被打乱了。
+    ///
+    /// 返回 `false` 表示位置没变（或这条根本不在当前选项卡里），此时**不写盘**。
+    fn apply_reorder(&mut self, key: &str, slot: usize) -> bool {
+        let Some(tab) = self.tabs.get(self.active_tab).cloned() else {
+            return false;
+        };
+        let overrides = self.state.get().entries.clone();
+        let full = self.library.view(&tab, "", &overrides);
+        let mut order: Vec<String> = full
+            .iter()
+            .filter_map(|&i| self.library.get(i))
+            .map(crate::model::library::path_key)
+            .collect();
+
+        let Some(from) = order.iter().position(|k| k == key) else {
+            // 键不在当前选项卡里（例如拖拽中途改过分组）。
+            // 什么都不做比"猜一个位置"安全。
+            return false;
+        };
+
+        // 可见落点 → 基准视图里的位置。可见集合是基准视图的子序列，
+        // 所以"可见集合的末尾"就是"基准视图的末尾"，取不到直接算末尾。
+        let target = match self.visible.get(slot).and_then(|&i| self.library.get(i)) {
+            Some(s) => {
+                let k = crate::model::library::path_key(s);
+                match order.iter().position(|x| *x == k) {
+                    Some(p) => p,
+                    None => return false,
+                }
+            }
+            None => order.len(),
+        };
+
+        // 先把被拖的那条**摘出来**，再插进目标位置 —— 顺序反了会用错的下标。
+        // 摘除之后，目标位置若原本在它后面，就要整体前移一格。
+        let moved = order.remove(from);
+        let target = if target > from { target - 1 } else { target };
+        let target = target.min(order.len());
+        if target == from {
+            // 位置没变（拖了一点又放回原处）：不写盘。
+            // 每次拖动都重写整张表既没必要，也会让"手抖一下"留下无谓的磁盘写。
+            return false;
+        }
+        order.insert(target, moved);
+        debug_assert!(order.iter().any(|k| k == key));
+
+        for (i, k) in order.iter().enumerate() {
+            let mut ov = self.state.get().entry(k);
+            ov.order = Some(i as u32);
+            self.state.get_mut().set_entry(k, ov);
+        }
+        if let Err(e) = self.state.save() {
+            eprintln!("保存条目顺序失败: {e}");
+        }
+
+        // 顺序变了，可见集合要按新序号重算（顺带清空选中集与拖拽状态）。
+        self.refresh_view();
+        true
     }
 
     /// 清掉覆盖表里"指向已不存在的条目"的记录。
@@ -1811,6 +1898,20 @@ impl App {
             // 设置面板展开时不画网格：遮罩只有 90% 黑，网格的滚动条与方格
             // 仍会隐约透出来，看起来像"面板没画干净"。模态下面不该有可辨内容。
             if !self.settings_open {
+                // 拖拽排序的插入位置：把**可见条目下标**换算成 `tiles` 内部的
+                // 局部序号（`grid.draw` 只认识 `tiles`，不知道 `first_item` 这个偏移）。
+                //
+                // 只在这个分支里算：设置面板展开时网格根本不画，算了也没人看。
+                //
+                // `saturating_sub` 是零成本的保险：拖拽期间没有自动滚动，
+                // `first_item` 不会变，落点必然不小于它。
+                let drop_slot = self
+                    .tile_drag
+                    .as_ref()
+                    .filter(|d| d.active)
+                    .and_then(|d| d.over_index)
+                    .map(|s| s.saturating_sub(self.layout.first_item));
+
                 self.grid.ensure(self.renderer.context())?;
                 self.grid.draw(
                     self.renderer.context(),
@@ -1821,6 +1922,7 @@ impl App {
                     &tile_icons,
                     hover_tile,
                     &tile_selected,
+                    drop_slot,
                     opacity,
                 )?;
             }
@@ -3115,6 +3217,7 @@ impl App {
                     index,
                     start: (lx, ly),
                     active: false,
+                    over_index: None,
                 });
                 // 记下起点之后才算"按下完成"。这里返回 true 让界面重绘一次：
                 // 收敛选中集可能让别的方格从选中态变回普通态。
@@ -3149,33 +3252,44 @@ impl App {
             }
 
             let (lx, ly) = self.to_logical(x, y);
-            return match self.layout.tab_at(lx, ly) {
-                Some(tab) => {
-                    // 兜底核对：选中集**理应**包含被拖的那一条（按下时就写进去了），
-                    // 但只要中间任何一个环节出错（比如选中集被别的事件清掉、
-                    // 而拖拽状态没跟着清），结果就是"拖了半天一项都没动"，
-                    // 而且没有任何提示。用按下时记下的键核对一次，缺了就补上 ——
-                    // 宁可只挪这一条，也不能让用户的拖动无声无息地丢掉。
-                    if !self.selected.contains(&drag.key) {
-                        self.selected.clear();
-                        self.selected.insert(drag.key.clone());
-                    }
-                    let group = self.tabs.get(tab).map(|t| t.key.clone());
-                    match group {
-                        Some(group) => self.move_selection_to_group(Some(group)),
-                        None => false,
-                    }
+
+            // ---- 落在侧栏选项卡上 = 改分组 ----
+            if let Some(tab) = self.layout.tab_at(lx, ly) {
+                // 兜底核对：选中集**理应**包含被拖的那一条（按下时就写进去了），
+                // 但只要中间任何一个环节出错（比如选中集被别的事件清掉、
+                // 而拖拽状态没跟着清），结果就是"拖了半天一项都没动"，
+                // 而且没有任何提示。用按下时记下的键核对一次，缺了就补上 ——
+                // 宁可只挪这一条，也不能让用户的拖动无声无息地丢掉。
+                if !self.selected.contains(&drag.key) {
+                    self.selected.clear();
+                    self.selected.insert(drag.key.clone());
                 }
-                // 落在非选项卡处松手 = 用户改主意了，什么都不做。
-                //
-                // 这里**不能**退化成"移到主界面"：用户只是把条目拖到空白处
-                // 想放弃这次拖动，把它挪到主界面是一个他没要求的改动。
-                //
-                // 而且这次松手必须**吞掉**（返回 true）：不吞的话它会继续
-                // 走到下面的侧栏逻辑里，落点上的选项卡会被当成"点了一下侧栏"，
+                if let Some(group) = self.tabs.get(tab).map(|t| t.key.clone()) {
+                    self.move_selection_to_group(Some(group));
+                }
+                // 这次松手**必须吞掉**（返回 true）：不吞的话它会继续走到下面的
+                // 侧栏逻辑里，落点上的选项卡会被当成"点了一下侧栏"，
                 // 于是拖拽顺带把视图切走了。
-                None => true,
-            };
+                return true;
+            }
+
+            // ---- 落在网格里 = 调整排序 ----
+            //
+            // `over_index` 是**可见集合**里的缝隙下标；`apply_reorder` 自己会
+            // 把它换算到当前选项卡的完整顺序上 —— 搜索过滤时这两者不是一回事。
+            if let Some(slot) = drag.over_index {
+                self.apply_reorder(&drag.key, slot);
+                return true;
+            }
+
+            // ---- 落在两者之外的空白处 = 放弃这次拖动 ----
+            //
+            // 这里**不能**退化成"移到主界面"：用户只是把条目拖到空白处
+            // 想放弃这次拖动，把它挪到主界面是一个他没要求的改动。
+            //
+            // 同样必须**吞掉**这次松手：不吞的话它会继续走到下面的侧栏逻辑里，
+            // 落点上的选项卡会被当成"点了一下侧栏"，于是拖拽顺带把视图切走了。
+            return true;
         }
 
         // ---- 侧栏按钮：拖动排序 ----
@@ -3339,13 +3453,22 @@ impl App {
                 drag.active = true;
             }
 
-            // 落点：鼠标此刻是否停在某个选项卡按钮上。
+            // 落点分两种，**互斥**：
+            // * 停在某个选项卡按钮上 = 改分组；
+            // * 停在网格里 = 改排序。
             //
             // 不在按钮上时记 `None`，而不是像侧栏排序那样保留上一次的落点 ——
             // 分组是**破坏性更强**的操作（条目会从当前视图里消失），
             // "鼠标已经划走却还能落在上一次那个按钮上"会造成误改分组。
+            // 排序同样不保留：鼠标移出去还留着插入线，用户会以为松手一定生效。
             let target = self.layout.tab_at(lx, ly);
-            let changed = target != self.tile_drop;
+            let over = if target.is_some() {
+                None
+            } else {
+                self.layout.drop_slot_at(lx, ly)
+            };
+            let changed = target != self.tile_drop || over != drag.over_index;
+            drag.over_index = over;
             self.tile_drop = target;
             return changed;
         }

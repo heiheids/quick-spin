@@ -88,6 +88,13 @@ impl GridPainter {
         icons: &[Option<ID2D1Bitmap1>],
         hover: Option<usize>,
         selected: &[bool],
+        // 拖拽排序时的插入位置。
+        //
+        // 口径与上面两个不同：它是 `layout.tiles` 的**局部**下标
+        // （`0..=tiles.len()`，调用方已减掉 `first_item`）——
+        // 绘制层只认识 `tiles`，让它在不知道偏移的情况下自己换算，
+        // 迟早会算错一格。
+        drop_slot: Option<usize>,
         opacity: f32,
     ) -> Result<()> {
         let Some(brush) = &self.brush else {
@@ -235,6 +242,45 @@ impl GridPainter {
                         None,
                         None,
                     );
+                }
+            }
+
+            // ---- 拖拽排序的插入位置 ----
+            //
+            // 一条 2px 的强调色竖线，画在"松手后条目会插进去的那道缝"上。
+            // 不放这条线的话，整个拖拽过程界面**没有任何反馈**，用户只能靠猜
+            // 自己会落在哪一格旁边 —— 落错了还得再拖一次才能改回来。
+            if let Some(slot) = drop_slot {
+                let n = layout.tiles.len();
+                if n > 0 {
+                    // 越界的落点按末尾处理：调用方已经把偏移减掉了，
+                    // 这里再夹一次是零成本的保险，免得下面下标越界 panic。
+                    let slot = slot.min(n);
+                    // 竖线高度跟着它所在**那一行**的方格走。插在末尾时没有
+                    // "后一个方格"可用，退化成用最后一个方格所在的行 ——
+                    // 那一行也正是用户看到鼠标底下的那一行。
+                    let row = &layout.tiles[slot.min(n - 1)];
+                    let gap = layout.tile_gap as f32;
+                    let x = if slot < n {
+                        layout.tiles[slot].x as f32 - gap / 2.0
+                    } else {
+                        let last = &layout.tiles[n - 1];
+                        (last.x + last.w) as f32 + gap / 2.0
+                    };
+                    // 上下各收 2px：顶满方格上下沿会看起来像方格自己的边框，
+                    // 而它是"缝"，不该和格子的边界混在一起。
+                    let top = row.y as f32 + 2.0;
+                    let bottom = (row.y + row.h) as f32 - 2.0;
+                    if bottom > top {
+                        brush.SetColor(&to_d2d(scheme.accent));
+                        ctx.DrawLine(
+                            Vector2 { X: x, Y: top },
+                            Vector2 { X: x, Y: bottom },
+                            brush,
+                            2.0,
+                            no_style,
+                        );
+                    }
                 }
             }
         }

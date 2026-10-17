@@ -199,6 +199,12 @@ pub struct Layout {
 
     /// 内容区
     pub content: RectI,
+    /// 方格之间的间隙（DIP，水平与垂直同值）。
+    ///
+    /// 绘制层要用它把"拖拽排序的插入线"画在**两格之间的缝**里。这个位置
+    /// 靠方格矩形反推不出来 —— 插在行尾那一道的右边没有下一个方格，
+    /// 光看矩形只能猜一个宽度。所以间隙由布局明确给出，不让绘制层自己编。
+    pub tile_gap: u32,
     /// **可见**方格的位置。
     ///
     /// `tiles[i]` 对应第 `first_item + i` 号条目，不是第 `i` 号。
@@ -451,6 +457,7 @@ impl Layout {
             grid_columns: columns,
             grid_rows: visible_rows,
             icon_size: input.icon_size as f32,
+            tile_gap: input.tile_gap,
             settings_panel,
             settings_close,
             settings_swatches,
@@ -515,5 +522,50 @@ impl Layout {
             .iter()
             .position(|r| r.contains(x, y))
             .map(|i| self.first_item + i)
+    }
+
+    /// 命中**插入位置**（拖拽排序的落点），返回"缝隙"的序号。
+    ///
+    /// 取值在 `first_item..=first_item + tiles.len()`：`s` 表示"插在第 `s` 条
+    /// 之前"，取到上界表示"插在最后一条之后"。与 [`Layout::tile_at`] 同口径
+    ///（都是**条目下标**），调用方不必再做一次换算。
+    ///
+    /// 点不在内容区里一律返回 `None`。这一条**不能省**：拖到侧栏、标题栏或
+    /// 窗口外一点点时若还算得出落点，松手就会让条目莫名跳走 ——
+    /// 而用户以为自己取消了这次拖动。
+    pub fn drop_slot_at(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.content.contains(x, y) || self.tiles.is_empty() {
+            return None;
+        }
+
+        // 落在某个方格上：按**中线**分前后，决定插在它前面还是后面。
+        // 这是资源管理器与桌面的通用手感，用户不需要学。
+        if let Some(i) = self.tiles.iter().position(|r| r.contains(x, y)) {
+            let r = &self.tiles[i];
+            let before = x < r.x + r.w / 2;
+            return Some(self.first_item + if before { i } else { i + 1 });
+        }
+
+        // 落在方格之间、行尾、或最后一格右边的空白里：取**最近的方格中心**，
+        // 再按中线分前后。少了这一支的话，"拖到最后一个图标右边"会算不出落点，
+        // 而那恰恰是最常用的操作之一（把条目挪到末尾）。
+        //
+        // 比较平方距离，不开方：只需要大小关系，开方是白算的。
+        let mut best = 0usize;
+        let mut best_d = i64::MAX;
+        for (i, r) in self.tiles.iter().enumerate() {
+            let cx = (r.x + r.w / 2) as i64;
+            let cy = (r.y + r.h / 2) as i64;
+            let dx = cx - x as i64;
+            let dy = cy - y as i64;
+            let d = dx * dx + dy * dy;
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        let r = &self.tiles[best];
+        let before = x < r.x + r.w / 2;
+        Some(self.first_item + if before { best } else { best + 1 })
     }
 }
