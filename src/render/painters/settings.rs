@@ -106,10 +106,14 @@ impl SettingsPainter {
             ctx.FillRoundedRectangle(&frame, brush);
             // 外圈再补一层同色描边，盖掉圆角处的抗锯齿边缘
             ctx.DrawRoundedRectangle(&frame, brush, 1.0, no_style);
-            // 用强调色描边，让设置面板明确是"浮在主面板之上的一层"。
-            // 之前用的是几乎看不见的分隔线色，结果它和主面板糊成一片，
+            // 用派生出的"同色系更深色"描边，让设置面板明确是"浮在主面板之上
+            // 的一层"。之前用的是几乎看不见的分隔线色，结果它和主面板糊成一片，
             // 连边框在哪都分不清。
-            brush.SetColor(&to_d2d(scheme.tab_active_border.with_alpha(0x66)));
+            //
+            // **不压透明度**，理由与右键菜单同：面板的填充色就是面板色本身，
+            // 背后又是同一块面板，边界全靠这条线。40% 不透明度下只差十几个色阶，
+            // 等于没有边框（`tab_active_border` 的 `0x66` 就是这么来的）。
+            brush.SetColor(&to_d2d(scheme.tab_active_border));
             ctx.DrawRoundedRectangle(&frame, brush, 1.2, no_style);
 
             // ---- 关闭按钮 ----

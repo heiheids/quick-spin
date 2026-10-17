@@ -332,7 +332,17 @@ impl MenuPainter {
             brush.SetColor(&to_d2d(scheme.panel.midpoint().with_alpha(255)));
             ctx.FillRoundedRectangle(&rounded_i(frame, 8.0), brush);
 
-            brush.SetColor(&to_d2d(scheme.tab_active_border.with_alpha(0x66)));
+            // 描边：用派生出的"同色系更深色"（`tab_active_border`），
+            // 且**不压透明度**。
+            //
+            // 菜单的填充色**就是面板色本身**（上面那行 `panel.midpoint()`），
+            // 背后又是同一块面板 —— 于是"哪里是菜单的边界"完全落在这条线上，
+            // 它是唯一的分界信号，不能被削弱。
+            //
+            // 原来这里是 `with_alpha(0x66)`（40%）。叠在面板上只差十几个色阶，
+            // 实测反馈正是"不容易看清边界"：菜单看着像没有边框，和背后的面板
+            // 糊成一片。
+            brush.SetColor(&to_d2d(scheme.tab_active_border));
             ctx.DrawRoundedRectangle(&rounded_i(frame, 8.0), brush, 1.0, no_style);
 
             // 悬停高亮只画在可用项上：置灰项高亮会让人以为能点
