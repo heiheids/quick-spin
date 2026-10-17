@@ -218,10 +218,21 @@ impl Scheme {
     }
 
     pub fn finalize(&mut self) {
-        self.tile_hover = self.tile_bg.mix_toward(self.accent, 0.30);
+        // 悬停色**往白色混**，而不是往强调色混。
+        //
+        // 原先写的是 `mix_toward(accent, 0.30)`，问题是强调色由用户在调色板里选：
+        // 选了偏暗或与底色接近的强调色（例如墨蓝系）时，混出来的悬停色和底色
+        // 几乎分不出来，悬停等于没有反馈。往白色混则与强调色无关，深色主题
+        // 会提亮、浅色主题会变实，两种情况都稳定可见。
+        //
+        // 语义也由此分开：**悬停 = 变淡，选中 = 强调色**。选中态仍带 2px 强调色
+        // 描边，所以即使悬停正好发生在已选中的格子上，两者也分得清。
+        self.tile_hover = self.tile_bg.mix_toward(Color::new(0xFF, 0xFF, 0xFF, 0xFF), 0.20);
         self.tile_active = self.tile_bg.mix_toward(self.accent, 0.55);
         self.accent_soft = self.accent.with_alpha(self.accent.a() / 3);
-        self.tab_hover = self.hover_base.mix_toward(self.accent, 0.35);
+        // 与 `tile_hover` 同理：往白色混，保证无论强调色选什么都能看出悬停。
+        // 选项卡的选中态不用这个色（它有自己的 active 底色与描边）。
+        self.tab_hover = self.hover_base.mix_toward(Color::new(0xFF, 0xFF, 0xFF, 0xFF), 0.20);
 
         // ---- 边框：统一取"同色系更深色" ----
         //
