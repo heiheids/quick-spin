@@ -1,0 +1,76 @@
+[package]
+name = "quick-spin"
+version = "0.1.0"
+edition = "2024"
+description = "低内存、界面透明可调色的 Windows 快捷方式启动器（Direct2D 自绘）"
+# PolyForm Noncommercial 1.0.0：源码公开但禁止商用，**不是 OSI 意义上的开源**。
+# 这是有效的 SPDX 标识符，cargo 能识别。
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/heiheids/quick-spin"
+readme = "README.md"
+# 这是应用程序而不是库，不发到 crates.io；许可证也不符合 crates.io 的开源要求。
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.1.8"
+# Direct2D / Direct3D / DComposition 的 DIP 坐标用 Vector2 / Matrix3x2 表达，
+# windows crate 不再导出它们，必须单独依赖。
+windows-numerics = "0.3"
+windows = { version = "0.62.2", features = [    "Win32_Foundation",
+    "Win32_Globalization",
+    # 图形栈：D3D11 设备 → DXGI 交换链 → D2D1 绘制 → DComposition 提交
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    # STGMEDIUM 被门控在 all(Win32_Graphics_Gdi, 本特性) 上 ——
+    # 少了它，`STGMEDIUM` 会报 unresolved import，而模块名看起来明明是对的。
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    # RegisterClipboardFormatW：取 "Shell IDList Array" 的格式号。
+    # 该号由系统运行时分配，不能硬编码。
+    "Win32_System_DataExchange",
+    # GlobalLock/GlobalUnlock：读 CFSTR_SHELLIDLIST 的共享内存块
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    # OLE 拖放目标（IDropTarget/RegisterDragDrop）——接收壳命名空间项
+    #（此电脑、回收站…）必须走它：WM_DROPFILES 只能收到文件系统路径。
+    "Win32_System_Ole",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    # `CreateMutexW`（单实例）被门控在本特性上 —— 它的签名里带
+    # SECURITY_ATTRIBUTES，所以整个函数挂在 Security 而不是 Threading 下。
+    "Win32_Security",
+    # `IDropTarget` 的方法签名里带 MODIFIERKEYS_FLAGS（来自 SystemServices），
+    # 所以整个接口被门控在本特性上 —— 不开的话 IDropTarget 会"找不到"，
+    # 尽管 Win32_System_Ole 已经开着。
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# `#[implement]` 宏生成的是 `windows_core::...` 路径，不会走 `windows` 的重导出，
+# 所以必须把 windows-core 显式列为依赖，否则报 "cannot find windows_core"。
+windows-core = "0.62"
+
+# 运行效率与体积优先：发布版全量 LTO、单代码生成单元、剥离符号。
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

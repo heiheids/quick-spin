@@ -1,0 +1,7 @@
+# 源码统一用 LF。Windows 上 git 默认会把检出内容转成 CRLF，
+# 结果是同一份文件在不同机器上 diff 出满屏的换行差异，review 时很干扰。
+* text=auto eol=lf
+
+# 图片是二进制，不要做任何行尾或文本转换。
+*.png binary
+*.ico binary

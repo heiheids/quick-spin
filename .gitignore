@@ -1,0 +1,22 @@
+# 构建产物。**注意：这个目录很大（3 GB 量级）**，而且现在的数据目录布局是
+# "数据与 exe 同目录"，所以 target\release\ 里还放着本程序自己的
+# config.toml / state.toml / shortcuts\ / icon-cache\ —— 那些是个人使用数据，
+# 绝不能提交。下面几条是显式兜底，即便将来数据目录换了位置也不会被误传。
+target/
+
+# 本程序自己的运行数据（个人配置、快捷方式、缓存），任何位置都不提交
+config.toml
+state.toml
+shortcuts/
+icon-cache/
+lang/
+
+# 程序自动生成的备份文件
+*.bak-*
+
+# 编辑器 / 系统杂项
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
