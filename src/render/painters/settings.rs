@@ -116,7 +116,8 @@ impl SettingsPainter {
             brush.SetColor(&to_d2d(scheme.tab_active_border));
             ctx.DrawRoundedRectangle(&frame, brush, 1.2, no_style);
 
-            // 外侧再补一圈淡灰描边，与内侧的深色线并排成"双线"。
+            // 外侧再补一圈描边（`overlay_ring`，与方格悬停高亮同色），
+            // 与内侧的深色线并排成"双线"。
             // 让出**整整一个线宽**（1.2）的理由见 `menu.rs`：
             // 描边以路径为中心，两条线的中心间隔必须等于线宽才紧贴而不重叠。
             //
