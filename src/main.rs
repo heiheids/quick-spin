@@ -587,7 +587,15 @@ fn diagnose() -> ExitCode {
 
     // 配色方案 = 内置方案 + 用户自定义（同名覆盖）
     let schemes = SchemeBook::new(&cfg.schemes);
-    let scheme = schemes.resolve(&cfg.appearance.scheme);
+    // **与 `App::new` 保持一致的取值规则**：自定义基础色优先。
+    //
+    // 不这么做的话，配了 `base_color` 的人会看到 `--diagnose` 报出**另一个**
+    // 方案名（命名的那个），排查"颜色为什么不对"时会被它带偏 ——
+    // 实测就踩过一次：以为主题是深蓝，实际渲染的是基础色派生出来的橄榄绿。
+    let scheme = match config::Color::from_hex(&cfg.appearance.base_color) {
+        Some(base) => config::Scheme::from_base(base),
+        None => schemes.resolve(&cfg.appearance.scheme).clone(),
+    };
 
     // 语言：配置留空表示跟随系统
     let lang_dir = paths::lang_dir().ok();
@@ -624,6 +632,18 @@ fn diagnose() -> ExitCode {
     println!(
         "  亚克力色 : 0x{:08X}（供系统模糊层着色）",
         scheme.acrylic_tint(cfg.appearance.opacity).0
+    );
+    // 派生出来的交互态颜色也一并打出来。
+    //
+    // 它们是"看着没问题、实际全透明"这类故障的唯一线索：悬停/选中是绘制时
+    // 现取这几个字段的，只要派生没跑过，界面上就是**什么都不显示**，
+    // 而且不报任何错。打出来一眼就能确认。
+    println!(
+        "  交互态   : 悬停 0x{:08X} / 选项卡悬停 0x{:08X} / 选中 0x{:08X} / 强调整色 0x{:08X}",
+        scheme.tile_hover.0,
+        scheme.tab_hover.0,
+        scheme.tile_active.0,
+        scheme.accent_soft.0
     );
     println!("  可选方案 :");
     for (key, name) in schemes.listing() {

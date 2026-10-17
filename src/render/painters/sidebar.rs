@@ -150,12 +150,17 @@ impl SidebarPainter {
                 let is_hover = hover_tab == Some(i);
                 let frame = rounded_i(*rect, TAB_RADIUS);
 
-                // 悬停时只加一层极淡的底，用来反馈"鼠标在这里"。
+                // 悬停时加一层提亮叠色，用来反馈"鼠标在这里"。
                 // 它不是"底色"—— 只在悬停瞬间出现，静止时按钮上什么都没有。
+                //
+                // 这里**不额外压低 alpha**。原来乘了个 0.6，在那时是合理的
+                //（悬停色偏重，压一压更协调）；改成统一的提亮白纱之后，
+                // 再乘 0.6 会让侧栏的悬停明显弱于菜单和设置面板 ——
+                // 需求是"所有按钮和菜单"用同一种变淡方式，强度就不该分档。
                 if is_hover && !is_active {
                     let fill = scheme.tab_hover;
                     brush.SetColor(&to_d2d(
-                        fill.with_alpha((fill.a() as f32 * opacity * 0.6).round() as u8),
+                        fill.with_alpha((fill.a() as f32 * opacity).round() as u8),
                     ));
                     ctx.FillRoundedRectangle(&frame, brush);
                 }
