@@ -345,6 +345,19 @@ impl MenuPainter {
             brush.SetColor(&to_d2d(scheme.tab_active_border));
             ctx.DrawRoundedRectangle(&rounded_i(frame, 8.0), brush, 1.0, no_style);
 
+            // 外侧再补一圈淡灰描边，与内侧的深色线并排成"双线"。
+            //
+            // 往外让出**整整一个线宽**（1.0）：D2D 的描边以**路径**为中心，
+            // 内侧线因此占 `[-0.5, +0.5]`，外圈路径放到 `+1.0` 正好占
+            // `[+0.5, +1.5]` —— 两条线紧贴而不重叠。只让 0.5 的话它们会各占
+            // 一半、互相盖掉一层，两种颜色混在一起就脏了。
+            //
+            // 圆角跟着一起放大（8.0 → 9.0）：只放大矩形而不放大圆角的话，
+            // 外圈的四个角会比内圈"更方"，转角处会露出内圈的痕迹。
+            let outer = RectI::new(frame.x - 1, frame.y - 1, frame.w + 2, frame.h + 2);
+            brush.SetColor(&to_d2d(scheme.overlay_ring));
+            ctx.DrawRoundedRectangle(&rounded_i(outer, 9.0), brush, 1.0, no_style);
+
             // 悬停高亮只画在可用项上：置灰项高亮会让人以为能点
             if let Some(i) = hover {
                 if let Some(row) = menu.rows.get(i) {

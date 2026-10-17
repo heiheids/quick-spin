@@ -99,6 +99,18 @@ pub struct Scheme {
     pub accent_soft: Color,
     #[serde(skip)]
     pub tab_hover: Color,
+    /// 浮层（右键菜单、设置面板）**外侧**那一圈淡灰描边。
+    ///
+    /// 与内侧的 `tab_active_border`（同色系更深色）配成"双线"：
+    /// 深色内线勾出边界，外侧淡灰线把浮层从**同色**的面板上"抬"起来。
+    /// 需求原话："菜单边框外再加一圈淡灰色边框，宽度和现在的边框一样。"
+    ///
+    /// **固定中性灰，不从面板色派生**：这一圈要的就是"没有色相"，
+    /// 从橄榄色面板派生出来会变成淡橄榄，那就不叫灰了。
+    /// 也正因为是中性灰，它在**深色底**上比内侧的深色线还有效 ——
+    /// 深色面板再压暗接近黑，内线和面板本来就分不开。
+    #[serde(skip)]
+    pub overlay_ring: Color,
 }
 
 impl Default for Scheme {
@@ -146,6 +158,7 @@ impl Default for Scheme {
             tile_active: Color::TRANSPARENT,
             accent_soft: Color::TRANSPARENT,
             tab_hover: Color::TRANSPARENT,
+            overlay_ring: Color::TRANSPARENT,
         }
     }
 }
@@ -274,6 +287,13 @@ impl Scheme {
         // 选项卡的选中态不用这个色（它有自己的 active 底色与描边），
         // 所以悬停和选中不会互相干扰。
         self.tab_hover = self.hover_base.with_alpha(HOVER_ALPHA).mix_toward(hover_white, 0.90);
+
+        // 浮层外圈的淡灰描边（见 `overlay_ring` 的字段说明）。
+        //
+        // 固定中性灰、**不压透明度**：它是"外侧"那条线，加它的理由就是
+        // 把浮层从同色面板上"抬"起来，压了透明度又会和面板糊成一片 ——
+        // 内侧那条线当初就是这么糊掉的（原先写的 `with_alpha(0x66)`）。
+        self.overlay_ring = Color::new(0xFF, 0xD5, 0xD8, 0xDD);
 
         // ---- 边框：统一取"同色系更深色" ----
         //

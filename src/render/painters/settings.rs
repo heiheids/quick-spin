@@ -116,6 +116,23 @@ impl SettingsPainter {
             brush.SetColor(&to_d2d(scheme.tab_active_border));
             ctx.DrawRoundedRectangle(&frame, brush, 1.2, no_style);
 
+            // 外侧再补一圈淡灰描边，与内侧的深色线并排成"双线"。
+            // 让出**整整一个线宽**（1.2）的理由见 `menu.rs`：
+            // 描边以路径为中心，两条线的中心间隔必须等于线宽才紧贴而不重叠。
+            //
+            // 这里用 `rounded`（f32）而不是 `rounded_i`：1.2 不是整数，
+            // 取整成 1 会让两条线重叠 0.2px —— 深色线被灰色盖掉一条，
+            // 边界会重新变虚，而"看得清"正是加这一圈的目的。
+            // 圆角同样跟着放大（14.0 → 15.2），否则四个角会露出内圈。
+            let (px, py) = (panel.x as f32, panel.y as f32);
+            let (pw, ph) = (panel.w as f32, panel.h as f32);
+            let outer = rounded(
+                (px - 1.2, py - 1.2, px + pw + 1.2, py + ph + 1.2),
+                15.2,
+            );
+            brush.SetColor(&to_d2d(scheme.overlay_ring));
+            ctx.DrawRoundedRectangle(&outer, brush, 1.2, no_style);
+
             // ---- 关闭按钮 ----
             let close = layout.settings_close;
             brush.SetColor(&to_d2d(if hover_close {
