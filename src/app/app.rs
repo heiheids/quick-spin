@@ -152,6 +152,28 @@ struct TileDrag {
 /// 阈值也不能太大：超过 4px 才承认拖拽的话，手稳的用户会以为拖拽坏了。
 const TILE_DRAG_THRESHOLD: i32 = 4;
 
+/// 诊断日志：**GUI 模式下没有控制台，`println!` 的输出会被直接丢掉**，
+/// 所以排查"卡在哪一步"必须写文件。记录相对进程启动的毫秒数，便于看间隔。
+///
+/// 只在动作路径上调用（启动、打开位置），每帧都调会拖慢绘制。
+fn diag(msg: &str) {
+    use std::io::Write;
+    use std::sync::OnceLock;
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    let t0 = T0.get_or_init(std::time::Instant::now);
+    let Ok(dir) = crate::paths::data_dir() else {
+        return;
+    };
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("诊断.log"))
+    else {
+        return;
+    };
+    let _ = writeln!(f, "[{:>7} ms] {msg}", t0.elapsed().as_millis());
+}
+
 /// 由覆盖表键（`.lnk` 完整路径）推出默认显示名：文件名去掉 `.lnk`。
 ///
 /// 这也正是资源管理器里重命名时看到的名字，符合直觉。
@@ -2453,11 +2475,15 @@ impl App {
             MenuCommand::AssignGroup(group) => ov.group = group,
             MenuCommand::OpenLocation => {
                 // 只读操作，不写覆盖表
+                diag(&format!("OpenLocation 开始: {key}"));
                 if let Some(s) = self.state_path_shortcut(&key) {
+                    diag(&format!("OpenLocation: 已定位 {}", s.display()));
                     if let Err(e) = crate::shell::launch::reveal(&s) {
-                        eprintln!("打开位置失败: {e}");
+                        diag(&format!("OpenLocation: reveal 失败 {e}"));
                     }
+                    diag("OpenLocation: reveal 已返回");
                 }
+                diag("OpenLocation 结束");
                 return true;
             }
             MenuCommand::Rename => {
@@ -3204,39 +3230,24 @@ impl App {
         };
 
         let target = shortcut.lnk_path.clone();
+        // 已解析好的目标。文件夹要据此绕开 shell（见 `launch::open_shortcut`）。
+        let resolved = shortcut.target.clone();
         let name = shortcut.name.clone();
         let hide_after = self.hide_after_launch();
 
-        // **绝不在 UI 线程上调用 `ShellExecuteW`。**
-        //
-        // 打开**文件系统文件夹**时，`ShellExecuteW` 会通过 DDE 与已有的
-        // 资源管理器实例通信，这个握手可能长时间不返回 —— 它的约定错误码里
-        // 就有一条 "28 DDE 操作超时"。一旦卡在 UI 线程上，窗口就不再处理消息，
-        // 表现是"程序无响应"，接着被系统或用户结束掉，看起来像崩溃。
-        //
-        // 为什么只有文件夹中招：命名空间项（此电脑、回收站、控制面板）没有
-        // 文件系统目标，走的是另一条不需要 DDE 的路径，所以它们一直正常。
-        //
-        // 挪到工作线程后就和界面彻底解耦：shell 卡多久都只是这个线程在等，
-        // 窗口照常重绘、照常响应。
-        std::thread::spawn(move || {
-            // ShellExecute 内部可能用到 COM，工作线程要自己初始化套间。
-            // 用 MTA 而不是 STA：这个线程没有消息泵，STA 下跨套间调用会一直等，
-            // 等于把卡死从 UI 线程搬到了这里。
-            let _com = crate::shell::com::ComGuard::mta();
-            // 启动失败不能崩，只报错；用户点错一个坏快捷方式不该让整个程序挂掉
-            match crate::shell::launch::open(&target) {
-                Ok(()) => println!("已启动: {name}"),
-                Err(e) => eprintln!("启动「{name}」失败: {e}"),
+        diag(&format!("launch_tile 开始: {name} -> {}", target.display()));
+        // 启动失败不能崩，只报错；用户点错一个坏快捷方式不该让整个程序挂掉
+        match crate::shell::launch::open_shortcut(&target, &resolved) {
+            Ok(()) => {
+                diag("launch_tile: shell 已返回成功");
+                if hide_after {
+                    self.window.hide();
+                    diag("launch_tile: 已收起窗口");
+                }
             }
-        });
-
-        // 收起面板不再等"启动成功"的同步结果 —— 现在拿不到，也不该等。
-        // "启动程序后收起面板"表达的就是"我点了，收起吧"，立刻收起对用户更顺；
-        // 失败信息仍走 stderr，与改动前一致。
-        if hide_after {
-            self.window.hide();
+            Err(e) => diag(&format!("launch_tile: 启动失败 {e}")),
         }
+        diag("launch_tile 结束");
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) -> bool {
