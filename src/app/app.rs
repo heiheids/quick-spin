@@ -3207,15 +3207,35 @@ impl App {
         let name = shortcut.name.clone();
         let hide_after = self.hide_after_launch();
 
-        // 启动失败不能崩，只报错；用户点错一个坏快捷方式不该让整个程序挂掉
-        match crate::shell::launch::open(&target) {
-            Ok(()) => {
-                println!("已启动: {name}");
-                if hide_after {
-                    self.window.hide();
-                }
+        // **绝不在 UI 线程上调用 `ShellExecuteW`。**
+        //
+        // 打开**文件系统文件夹**时，`ShellExecuteW` 会通过 DDE 与已有的
+        // 资源管理器实例通信，这个握手可能长时间不返回 —— 它的约定错误码里
+        // 就有一条 "28 DDE 操作超时"。一旦卡在 UI 线程上，窗口就不再处理消息，
+        // 表现是"程序无响应"，接着被系统或用户结束掉，看起来像崩溃。
+        //
+        // 为什么只有文件夹中招：命名空间项（此电脑、回收站、控制面板）没有
+        // 文件系统目标，走的是另一条不需要 DDE 的路径，所以它们一直正常。
+        //
+        // 挪到工作线程后就和界面彻底解耦：shell 卡多久都只是这个线程在等，
+        // 窗口照常重绘、照常响应。
+        std::thread::spawn(move || {
+            // ShellExecute 内部可能用到 COM，工作线程要自己初始化套间。
+            // 用 MTA 而不是 STA：这个线程没有消息泵，STA 下跨套间调用会一直等，
+            // 等于把卡死从 UI 线程搬到了这里。
+            let _com = crate::shell::com::ComGuard::mta();
+            // 启动失败不能崩，只报错；用户点错一个坏快捷方式不该让整个程序挂掉
+            match crate::shell::launch::open(&target) {
+                Ok(()) => println!("已启动: {name}"),
+                Err(e) => eprintln!("启动「{name}」失败: {e}"),
             }
-            Err(e) => eprintln!("启动「{name}」失败: {e}"),
+        });
+
+        // 收起面板不再等"启动成功"的同步结果 —— 现在拿不到，也不该等。
+        // "启动程序后收起面板"表达的就是"我点了，收起吧"，立刻收起对用户更顺；
+        // 失败信息仍走 stderr，与改动前一致。
+        if hide_after {
+            self.window.hide();
         }
     }
 
