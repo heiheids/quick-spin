@@ -177,6 +177,27 @@ pub fn clover_colors() -> [(u8, u8, u8); 4] {
     ]
 }
 
+/// 标题栏上那几个"有开关"的按钮的状态。
+///
+/// 绘制层只知道"要不要画成已启用"，**不知道**吸附/钉住的含义 ——
+/// 状态怎么变化是 `window.rs` 的事。这样加一个开关时不必改绘制逻辑。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ButtonStates {
+    pub docked: bool,
+    pub pinned: bool,
+}
+
+impl ButtonStates {
+    fn is_on(&self, b: TitleButton) -> bool {
+        match b {
+            TitleButton::Dock => self.docked,
+            TitleButton::Pin => self.pinned,
+            // 改色不是开关（它是一个弹出菜单），关闭是一次性动作。
+            _ => false,
+        }
+    }
+}
+
 /// 弹出子窗口的绘制器。
 ///
 /// 与其他绘制器同样的形状：一把白色笔刷，靠 `SetColor` 改色复用。
@@ -211,17 +232,19 @@ impl PopoutPainter {
     ///
     /// `items` 是要显示的条目（与主窗口该选项卡的可见条目同步），
     /// `icons` 是它们对应的位图，缺失的位置是 `None`（还没加载好）。
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         ctx: &ID2D1DeviceContext,
         text: &mut TextEngine,
-        layout: &PopoutLayout,
-        scheme: &Scheme,
-        title: &str,
-        hover: Option<TitleButton>,
-        items: &[Item],
-        icons: &[Option<ID2D1Bitmap1>],
-    ) -> Result<()> {
+    layout: &PopoutLayout,
+    scheme: &Scheme,
+    title: &str,
+    hover: Option<TitleButton>,
+    states: ButtonStates,
+    items: &[Item],
+    icons: &[Option<ID2D1Bitmap1>],
+) -> Result<()> {
         let Some(brush) = &self.brush else {
             return Ok(());
         };
@@ -291,14 +314,20 @@ impl PopoutPainter {
             let colors = clover_colors();
             for (i, btn) in TITLE_BUTTONS.iter().enumerate() {
                 let rect = layout.buttons[i];
+                let on = states.is_on(*btn);
 
-                // 悬停底色：与主窗口按钮一致的观感
+                // 底色两种，顺序有意义：**悬停优先于已启用**。
+                // 两者用不同的颜色（`tile_hover` vs `accent_soft`），
+                // 否则鼠标一划过就分不清"这个开关本来是开的，还是只是被指着"。
                 if hover == Some(*btn) {
                     brush.SetColor(&to_d2d(scheme.tile_hover));
                     ctx.FillRoundedRectangle(&rounded_i(rect, 6.0), brush);
+                } else if on {
+                    brush.SetColor(&to_d2d(scheme.accent_soft));
+                    ctx.FillRoundedRectangle(&rounded_i(rect, 6.0), brush);
                 }
 
-                let shapes = glyph(*btn, rect, false);
+                let shapes = glyph(*btn, rect, on);
                 for (k, s) in shapes.iter().enumerate() {
                     // 四叶草的四个圆各上一色；其余图标统一用文字色。
                     // 直接构造 `D2D1_COLOR_F` 而不是先做一个 `Color`：
@@ -312,6 +341,10 @@ impl PopoutPainter {
                             b: b as f32 / 255.0,
                             a: 1.0,
                         });
+                    } else if on {
+                        // 已启用的开关用强调色画图标本身。
+                        // 只靠底色区分不够：高对比主题下底色差可能看不出来。
+                        brush.SetColor(&to_d2d(scheme.accent));
                     } else {
                         brush.SetColor(&to_d2d(scheme.text_primary));
                     }

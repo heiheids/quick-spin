@@ -33,7 +33,10 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM, WIN32_ERROR,
 };
-use windows::Win32::Graphics::Gdi::{HBRUSH, InvalidateRect, ScreenToClient, ValidateRect};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, HBRUSH, InvalidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    MonitorFromWindow, ScreenToClient, ValidateRect,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 // 鼠标离开跟踪在 Input 模块下，不在 WindowsAndMessaging（容易记错）。
@@ -72,6 +75,20 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Resized { width: u32, height: u32 },
+    /// 窗口被移动了（`WM_MOVE`）。
+    ///
+    /// 与 `Resized` 分开是必须的：用户拖动标题栏时窗口**只移动、不改尺寸**，
+    /// 那条路上一件 `WM_SIZE` 都不会来。弹出子窗口的吸附跟随完全靠它驱动 ——
+    /// 这就是"事件驱动、不挂轮询定时器"的全部依据。
+    ///
+    /// **刻意不带坐标**：`WM_MOVE` 的 lParam 里坐标是 16 位的，超宽的虚拟桌面
+    ///（多块 4K 屏横向拼接）会被截断成负数；而消费方本来就要拿完整矩形
+    ///（`Window::geometry`）才能算吸附，带一份可能被截断的坐标只会变成陷阱。
+    ///
+    /// 它是**同步**分发的（见 `emit`）：用户拖主窗口时系统进入模态移动循环，
+    /// 我们自己的消息循环被卡在里面，但 `WM_MOVE` 仍会送到窗口过程。
+    /// 同步分发让被吸附的弹窗在拖动**过程中**实时跟上，而不是等松手才跳一下。
+    Moved,
     DpiChanged { dpi: u32 },
     /// 开始 / 结束拖动窗口尺寸。
     /// 缩放期间上层应切到轻量绘制（架构设计铁律 6）。
@@ -253,6 +270,62 @@ pub struct Geometry {
     pub y: Option<i32>,
 }
 
+/// 屏幕上的一个矩形（物理像素）。
+///
+/// 存 `x/y/w/h` 而不是 Win32 的 `RECT`（`left/top/right/bottom`）：
+/// 吸附那一套算法只做"加减宽高"，用宽高表达少一半心算，
+/// 也让它能在一个不引入 `windows` 类型的纯函数里被自检覆盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Rect {
+    pub fn right(&self) -> i32 {
+        self.x + self.w
+    }
+
+    pub fn bottom(&self) -> i32 {
+        self.y + self.h
+    }
+}
+
+/// 窗口所在显示器的**工作区**（扣掉任务栏之后的那块），物理像素。
+///
+/// 为什么不用整块屏幕：吸附到屏幕最右边时，任务栏/贴靠栏会盖住弹窗一截。
+/// `MONITOR_DEFAULTTONEAREST` 而不是 `MONITOR_DEFAULTTOPRIMARY`：多显示器下
+/// 要跟着窗口实际所在的那一块走。
+///
+/// 返回 `None` 表示拿不到（极罕见）。调用方应当**退化成"保持原位"**，
+/// 而不是猜一个坐标 —— 猜错的后果是把窗口丢到看不见的地方。
+pub fn work_area(hwnd: HWND) -> Option<Rect> {
+    // SAFETY: 两个调用都只读；`info` 的 `cbSize` 按结构体自身大小填，
+    // 这是 `GetMonitorInfoW` 要求的版本字段。
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let r = info.rcWork;
+        Some(Rect {
+            x: r.left,
+            y: r.top,
+            w: r.right - r.left,
+            h: r.bottom - r.top,
+        })
+    }
+}
+
 /// 可以跨线程使用的"请求重绘"凭据。
 ///
 /// ## 为什么需要单独一个类型
@@ -416,6 +489,15 @@ impl Window {
         unsafe { IsZoomed(self.hwnd).as_bool() }
     }
 
+    /// 是否已最小化。
+    ///
+    /// 单独需要它是因为**最小化会改窗口矩形**：系统把它挪到
+    /// `(-32000, -32000)` 这个哨兵位置，并且照发 `WM_MOVE`。
+    /// 拿那个矩形去算吸附，会把弹窗甩到屏幕外面去 —— 见 `App::follow_popouts`。
+    pub fn is_minimized(&self) -> bool {
+        unsafe { IsIconic(self.hwnd).as_bool() }
+    }
+
     pub fn is_visible(&self) -> bool {
         unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
@@ -552,14 +634,15 @@ impl Window {
         let _ = with_ctx(self.hwnd, |ctx| ctx.handler = Some(ptr));
     }
 
-    /// 移动 / 改变窗口位置与尺寸（屏幕物理像素）。
+    /// 移动**并**改变窗口尺寸（屏幕物理像素）。
     ///
-    /// 主窗口不用它：那里拖动标题栏交给系统（`HTCAPTION`），由系统处理 Snap 与
-    /// DWM 阴影。弹出子窗口要**吸附跟随主窗口**，必须由我们主动摆放，
-    /// 所以需要一个显式的设置入口。
+    /// 目前没有调用方：创建窗口时位置尺寸走 `Window::create`，而吸附跟随每次
+    /// 只改位置、用的是 [`Self::move_to`]（`SWP_NOSIZE`，省掉无谓的尺寸处理）。
+    /// 留着它是因为"摆一个窗口到指定矩形"是这一层完整的表达能力，
+    /// 而删掉再回加比留着更容易出错。
     pub fn set_geometry(&self, g: Geometry) {
-        // SWP_NOZORDER：不改 Z 序，否则吸附跟随会把主窗口压到下面。
-        // SWP_NOACTIVATE：不抢焦点，否则主窗口一移动焦点就跳到弹出窗口上。
+        // SWP_NOZORDER：不改 Z 序，否则摆放会把主窗口压到下面。
+        // SWP_NOACTIVATE：不抢焦点，否则主窗口一动焦点就跳到弹出窗口上。
         let _ = unsafe {
             SetWindowPos(
                 self.hwnd,
@@ -571,6 +654,36 @@ impl Window {
                 SWP_NOZORDER | SWP_NOACTIVATE,
             )
         };
+    }
+
+    /// 只移动、不改尺寸（屏幕物理像素）。
+    ///
+    /// 与 [`Self::set_geometry`] 分开是为了省掉多余的 resize：吸附跟随每次
+    /// 只改变位置，用 `SWP_NOSIZE` 可以避免那一串"尺寸没变但也走一遍"的开销
+    ///（交换链重建本来就由 `WM_SIZE` 判重挡住，这里连消息都不产生）。
+    pub fn move_to(&self, x: i32, y: i32) {
+        // SWP_NOSIZE：本次只摆位置。
+        // SWP_NOZORDER：不改 Z 序，否则跟随会把主窗口压到下面。
+        // SWP_NOACTIVATE：不抢焦点，否则主窗口一动焦点就跳到弹窗上。
+        let _ = unsafe {
+            SetWindowPos(
+                self.hwnd,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
+    }
+
+    /// 当前窗口左上角（屏幕物理像素）。最小化时系统会给出 -32000 之类的哨兵，
+    /// 所以调用方要自己判断合理性（`App::save_state` 就是这么做的）。
+    pub fn position(&self) -> (i32, i32) {
+        let mut rect = RECT::default();
+        let _ = unsafe { GetWindowRect(self.hwnd, &mut rect) };
+        (rect.left, rect.top)
     }
 
     /// 标记为主窗口。只影响 `WM_DESTROY` 时是否结束消息循环。
@@ -719,6 +832,17 @@ unsafe extern "system" fn wnd_proc(
             // 注意：这里的尺寸是**窗口**尺寸，而我们非客户区为 0，等同客户区
             info.ptMinTrackSize.x = (min.0 as f32 * scale).round() as i32;
             info.ptMinTrackSize.y = (min.1 as f32 * scale).round() as i32;
+            return LRESULT(0);
+        }
+
+        // 窗口被移动：用户拖标题栏、系统 Snap、或程序自己 `SetWindowPos`。
+        //
+        // 拖动标题栏时**只有这条消息、没有 WM_SIZE**，所以吸附跟随必须挂在它上面
+        //（见 `Event::Moved` 的说明）。刻意不标脏：只是挪了个位置，内容一个像素
+        // 都没变 —— 标脏会让拖动过程中每个 WM_MOVE 都白重画一帧。
+        // SWP 造成的暴露区域由 DWM 自己处理，画面本来是合成好的。
+        WM_MOVE => {
+            emit(hwnd, Event::Moved);
             return LRESULT(0);
         }
 

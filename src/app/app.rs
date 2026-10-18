@@ -815,7 +815,7 @@ impl App {
         // 复制一份句柄再调用：`self.window.run(&mut self)` 会同时借用
         // `self` 的字段与整体，借用检查器不接受。`Window` 是 Copy 的。
         let window = self.window;
-        window.show();
+        self.set_main_visible(true);
         let result = window.run(&mut self);
         self.save_state();
         result
@@ -1539,6 +1539,134 @@ impl App {
         }
     }
 
+    /// 收下"某个弹窗的位置 / 吸附 / 钉住变了"的回报并落盘。
+    ///
+    /// 与 [`App::adopt_closed_popouts`] 同一个收尾点、同一个理由：状态归装配层管，
+    /// 而动作发生在**弹窗自己**的事件处理里（拖完松手、点吸附/钉住按钮）。
+    ///
+    /// 收尾之后顺手跑一次跟随，是为了"点开吸附立刻生效"——
+    /// 否则要等主窗口动一下才贴上去，看起来像点了没用。
+    fn adopt_popout_states(&mut self) {
+        let changed = crate::popout::report::take_changed();
+        if changed.is_empty() {
+            return;
+        }
+        let mut dirty = false;
+        for key in changed {
+            if self.persist_popout(&key) {
+                dirty = true;
+            }
+        }
+        if dirty {
+            if let Err(e) = self.state.save() {
+                eprintln!("保存弹出窗口状态失败: {e}");
+            }
+            self.follow_popouts();
+        }
+    }
+
+    /// 把某个弹窗"现在该记住的东西"写进 `state.popout`。返回是否真的变了。
+    ///
+    /// **名字与独立配色不由这里写**：它们归装配层（弹窗那份是默认值，
+    /// 直接覆盖回去会把用户起的名字抹掉）。
+    fn persist_popout(&mut self, key: &str) -> bool {
+        let Some(p) = self.popouts.get(key) else {
+            // 窗口已经没了：这条回报与关闭撞在一起，交给关闭那条收尾。
+            return false;
+        };
+        let fresh = p.persistable();
+        let old = self.state.get().popout.get(key);
+        let merged = crate::popout::state::PopoutWindow {
+            name: old.name.clone(),
+            base_color: old.base_color.clone(),
+            ..fresh
+        };
+        if merged == old {
+            return false;
+        }
+        self.state.get_mut().popout.set(key, merged);
+        true
+    }
+
+    /// 主窗口所在矩形（屏幕物理像素）。
+    ///
+    /// `geometry()` 的宽高是**客户区**尺寸；这个窗口的非客户区已被
+    /// `WM_NCCALCSIZE` 去掉，所以它就是窗口尺寸 —— 吸附要的正是这个。
+    fn main_rect(&self) -> crate::platform::window::Rect {
+        let g = self.window.geometry();
+        crate::platform::window::Rect {
+            x: g.x.unwrap_or(0),
+            y: g.y.unwrap_or(0),
+            w: g.width.max(1),
+            h: g.height.max(1),
+        }
+    }
+
+    /// 吸附位；拿不到显示器工作区时退化成"贴主窗口右边、顶部对齐"。
+    ///
+    /// 退化值刻意**仍然贴着主窗口**：那是没有工作区信息时最可能正确的猜测，
+    /// 而且它至少跟着主窗口走，不会把窗口丢到屏幕角落。
+    fn dock_here(
+        &self,
+        main: crate::platform::window::Rect,
+        work: Option<crate::platform::window::Rect>,
+        size: (i32, i32),
+        side: crate::popout::state::DockSide,
+    ) -> (i32, i32) {
+        let req = crate::popout::dock::DockRequest {
+            main,
+            size,
+            side,
+            work,
+        };
+        match crate::popout::dock::dock_position(&req) {
+            Some(d) => (d.x, d.y),
+            None => (main.right(), main.y),
+        }
+    }
+
+    /// 让所有吸附中的弹窗跟上主窗口。
+    ///
+    /// 由主窗口的 `Moved` / `Resized` 驱动：**事件驱动，没有轮询定时器**
+    ///（`WM_MOVE` 在用户拖动时是每帧来的，所以看起来是连续跟随）。
+    fn follow_popouts(&mut self) {
+        // **主窗口最小化时不能跟随。**
+        //
+        // 最小化会把窗口矩形改成 `(-32000, -32000)` 这个哨兵位置，而且系统
+        // 照发 `WM_MOVE` —— 拿它去算吸附，弹窗会被甩到屏幕外几千像素处，
+        // 表现是"主窗口一最小化，弹窗就消失了"。恢复时矩形回来了，它会跟着
+        // 回到正确位置。
+        if self.window.is_minimized() {
+            return;
+        }
+        // 没有吸附中的窗口时连显示器工作区都不查：`WM_MOVE` 是鼠标移动频率的
+        // 消息，这里省下的是每次移动两次显示器查询。
+        if !self.popouts.values().any(|p| p.is_docked()) {
+            return;
+        }
+        let main = self.main_rect();
+        let work = crate::platform::window::work_area(self.window.hwnd());
+        for p in self.popouts.values_mut() {
+            p.follow_dock(main, work);
+        }
+    }
+
+    /// 显示 / 隐藏主窗口，并让弹窗跟着（**钉住的除外**）。
+    ///
+    /// 所有显隐都必须走这里。早先每个地方各自调 `window.hide()`，
+    /// 而弹窗联动是后加的 —— 漏掉任何一处，症状就是"主窗口收进托盘了，
+    /// 未钉住的弹窗还孤零零挂在桌面上"。
+    fn set_main_visible(&mut self, visible: bool) {
+        if visible {
+            self.window.show();
+        } else {
+            self.window.hide();
+        }
+        for p in self.popouts.values() {
+            p.sync_visibility(visible);
+        }
+    }
+
     /// 把各选项卡的**当前可见条目**推给对应的弹出子窗口。
     ///
     /// ## 为什么是"推"而不是"共享状态"
@@ -1664,19 +1792,26 @@ impl App {
             .unwrap_or_else(|| tab_key.to_string());
         let title = saved.title(&tab_label).to_string();
 
-        // 位置：优先用记下来的自由位置；否则吸附在主窗口右侧。
-        // `geometry()` 给的是屏幕物理像素，和 `Geometry` 要求的单位一致。
-        let main = self.window.geometry();
+        // 位置：**吸附数学只有 `dock.rs` 那一份**，创建与跟随共用它。
+        //
+        // 这段原来内联着"贴右边缘、顶部对齐"，而跟随那边还要再算一次 ——
+        // 两处各写一份必然漂移（本工程在键的构造、图标来源、显示名规则上
+        // 都吃过这个亏）。
         let scale = self.window.scale().max(1.0);
         let (dw, dh) = (
             (saved.width as f32 * scale) as i32,
             (saved.height as f32 * scale) as i32,
         );
-        let (mx, my) = (main.x.unwrap_or(0), main.y.unwrap_or(0));
-        let (x, y) = match (saved.x, saved.y) {
-            (Some(x), Some(y)) => (x, y),
-            // 吸附：贴主窗口右边缘，顶部对齐
-            _ => (mx + main.width, my),
+        let main = self.main_rect();
+        let work = crate::platform::window::work_area(self.window.hwnd());
+        let (x, y) = match (saved.docked, saved.x, saved.y) {
+            // 吸附中：位置由主窗口推导，记录里那份自由位置已经不作数
+            (true, ..) => self.dock_here(main, work, (dw, dh), saved.dock_side),
+            // 自由位置：用记下来的
+            (false, Some(x), Some(y)) => (x, y),
+            // 没吸附、却也从来没有过位置（手改过状态文件）→ 退回吸附位，
+            // 而不是把窗口丢到屏幕左上角
+            (false, _, _) => self.dock_here(main, work, (dw, dh), saved.dock_side),
         };
 
         let geometry = crate::platform::window::Geometry {
@@ -1692,6 +1827,9 @@ impl App {
             geometry,
             self.scheme.clone(),
             self.layout.icon_size as i32,
+            saved.docked,
+            saved.dock_side,
+            saved.pinned,
         ) {
             Ok(p) => {
                 // **必须先装箱、再 attach。顺序反了就是悬垂指针。**
@@ -1768,6 +1906,16 @@ impl App {
 
     /// 把窗口几何与界面状态写回 `state.toml`。
     fn save_state(&mut self) {
+        // **先把每个弹窗的状态收进来**（位置 / 尺寸 / 吸附 / 钉住）。
+        //
+        // 放在最前面：下面那段要可变借用 `state`，收不了。
+        // 弹窗自己"拖完松手"时会走回报通道立刻落盘，但还有一条路必须兜住：
+        // 用户拖完弹窗、没有任何后续动作就直接退出程序 —— 那时只有这里会写。
+        let keys: Vec<String> = self.popouts.keys().cloned().collect();
+        for k in &keys {
+            self.persist_popout(k);
+        }
+
         let geo = self.window.geometry();
         let maximized = self.maximized;
         let active_key = self
@@ -3880,7 +4028,7 @@ impl App {
                     //
                     // 没开托盘时仍走真正的最小化，否则窗口就再也叫不出来了。
                     if self.cfg.general.show_tray {
-                        self.window.hide();
+                        self.set_main_visible(false);
                     } else {
                         self.window.minimize();
                     }
@@ -4213,7 +4361,7 @@ impl App {
             Ok(()) => {
                 diag("launch_tile: shell 已返回成功");
                 if hide_after {
-                    self.window.hide();
+                    self.set_main_visible(false);
                     diag("launch_tile: 已收起窗口");
                 }
             }
@@ -4401,11 +4549,27 @@ impl Handler for App {
         // 晚一步修正，用户刚用弹窗自己的 ✕ 关掉、再来右键，
         // 看到的就还是「关闭子窗口」。见 `adopt_closed_popouts`。
         self.adopt_closed_popouts();
+        // 同理，弹窗自己改了位置/吸附/钉住也要先收进来 —— 状态落盘归这一层。
+        self.adopt_popout_states();
 
         match event {
             Event::Resized { width, height } => {
                 self.on_resized(width, height);
+                // 主窗口改尺寸会改吸附位（弹窗贴着它的边），所以跟着摆一次。
+                // 与 `Moved` 一样：事件驱动，不是每帧。
+                self.follow_popouts();
                 true
+            }
+            // 主窗口被移动（用户拖标题栏 / 系统 Snap）。
+            //
+            // 拖动时这条消息是**每帧**来的，而且是在系统的模态移动循环里
+            // 同步分发到这里的（见 `Event::Moved`），所以被吸附的弹窗看起来
+            // 是连续跟随，而不是松手才跳一下。
+            //
+            // 不请求重绘：主窗口只是换了个位置，内容一个像素都没变。
+            Event::Moved => {
+                self.follow_popouts();
+                false
             }
             Event::DpiChanged { .. } => {
                 self.rebuild_layout();
@@ -4436,20 +4600,22 @@ impl Handler for App {
             }
             Event::Hotkey => {
                 // 全局热键 = 呼出 / 隐藏窗口
-                self.window.toggle_visible();
+                let visible = self.window.is_visible();
+                self.set_main_visible(!visible);
                 true
             }
             Event::TrayLeftClick => {
                 // 左键单击托盘 = 显示 / 隐藏切换
-                self.window.toggle_visible();
+                let visible = self.window.is_visible();
+                self.set_main_visible(!visible);
                 true
             }
             Event::TrayRightClick => {
                 let visible = self.window.is_visible();
                 match crate::platform::tray::show_context_menu(self.window.hwnd(), visible) {
                     Some(crate::platform::tray::command::EXIT) => self.request_exit(),
-                    Some(crate::platform::tray::command::SHOW) => self.window.show(),
-                    Some(crate::platform::tray::command::HIDE) => self.window.hide(),
+                    Some(crate::platform::tray::command::SHOW) => self.set_main_visible(true),
+                    Some(crate::platform::tray::command::HIDE) => self.set_main_visible(false),
                     _ => {}
                 }
                 true
@@ -4578,7 +4744,7 @@ impl Handler for App {
         // 没有托盘图标时（用户在配置里关了）必须真的退出，
         // 否则窗口一藏就再也叫不出来了。
         if self.cfg.general.show_tray {
-            self.window.hide();
+            self.set_main_visible(false);
             return CloseAction::Hide;
         }
         CloseAction::Exit

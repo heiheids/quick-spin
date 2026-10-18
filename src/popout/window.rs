@@ -9,10 +9,12 @@
 use crate::config::theme::Scheme;
 use crate::error::Result;
 use crate::platform::hittest::HitTest;
-use crate::platform::window::{CloseAction, Event, Geometry, Handler, Window};
+use crate::platform::window::{CloseAction, Event, Geometry, Handler, Rect, Window};
+use crate::popout::dock::{self, DockRequest};
 use crate::popout::icons::{Content, PopoutIcons, pixel_size};
 use crate::popout::layout::{PopoutLayout, TitleButton};
-use crate::popout::painter::PopoutPainter;
+use crate::popout::painter::{ButtonStates, PopoutPainter};
+use crate::popout::state::DockSide;
 use crate::render::composer::Composer;
 use crate::render::device::Renderer;
 use crate::render::TextEngine;
@@ -71,18 +73,42 @@ pub struct Popout {
     content: Content,
     /// 这个窗口自己的图标加载线程与位图缓存。
     icons: PopoutIcons,
+    /// 是否吸附在主窗口侧面（跟着它移动/缩放）。用户一拖动本窗口就变 `false`。
+    docked: bool,
+    /// **期望**贴在主窗口哪一侧。翻边不改它（见 `state::PopoutWindow::dock_side`）。
+    dock_side: DockSide,
+    /// 是否"钉住"：主窗口收起时它留着（只管可见性，见 `state::PopoutWindow::pinned`）。
+    pinned: bool,
+    /// 客户区物理尺寸。
+    ///
+    /// 吸附计算需要它，而为此每帧调一次 `GetClientRect` 是白开销 ——
+    /// 尺寸只在 `WM_SIZE` / DPI 变化时变，跟着更新一份就够。
+    phys: (i32, i32),
+    /// 用户开始拖动/缩放**之前**的那一份几何 `(x, y, w, h)`。
+    ///
+    /// `Some` 表示"用户正在拖"。这是区分"用户拖动"与"程序吸附"的**全部依据**：
+    /// 见 [`Popout::on_user_size_move_end`]。
+    drag_start: Option<(i32, i32, i32, i32)>,
+    /// 上一次**由本程序**摆出去的位置。用来跳过重复的 `SetWindowPos`。
+    last_pos: Option<(i32, i32)>,
 }
 
 impl Popout {
     /// 创建一个弹出子窗口。
     ///
     /// `tab_key` 是它对应的选项卡 key，窗口自己关掉时要靠它回报装配层。
+    /// `docked` / `dock_side` 是它的初始吸附状态（第一次摆位由装配层算好、
+    /// 通过 `geometry` 传进来 —— 吸附数学只有 `dock.rs` 那一份）。
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         tab_key: &str,
         title: &str,
         geometry: Geometry,
         scheme: Scheme,
         icon_size: i32,
+        docked: bool,
+        dock_side: DockSide,
+        pinned: bool,
     ) -> Result<Self> {
         let window = Window::create(title, geometry, false)?;
         let (cw, ch) = window.client_size();
@@ -122,6 +148,12 @@ impl Popout {
                 items: Vec::new(),
             },
             icons,
+            docked,
+            dock_side,
+            pinned,
+            phys: (cw.max(1), ch.max(1)),
+            drag_start: None,
+            last_pos: geometry.x.zip(geometry.y),
         })
     }
 
@@ -180,18 +212,136 @@ impl Popout {
         self.window.request_redraw();
     }
 
-    /// 这几个是为**吸附跟随 / 保存位置**准备的（下一步）：
-    /// 主窗口移动时要读它的几何并反过来摆它，关闭时要把几何写回状态。
-    /// 现在还没有调用方，所以先显式允许死代码 —— 接线后请删掉这一行。
-    #[allow(dead_code)]
-    pub fn hwnd(&self) -> windows::Win32::Foundation::HWND {
-        self.window.hwnd()
+    /// 把这个窗口当前该记住的状态交回装配层去落盘。
+    ///
+    /// 装配层持有 `Box<Popout>`，所以这里不必排队回报 —— 直接读即可。
+    /// （"用户拖完松手"这种**需要立刻落盘**的时刻仍会走 `report::report_changed`，
+    /// 因为那时是窗口自己在处理事件。）
+    pub fn persistable(&self) -> crate::popout::state::PopoutWindow {
+        let (x, y) = self.window.position();
+        let mut w = crate::popout::state::PopoutWindow {
+            open: true,
+            // 吸附时不存位置：位置由主窗口推导，存下来只会是一份很快过期的
+            // 副本，下次启动先按它摆一下再跳到吸附位，看起来就是"闪了一下"。
+            x: if self.docked { None } else { Some(x) },
+            y: if self.docked { None } else { Some(y) },
+            width: (self.phys.0 as f32 / self.window.scale().max(1.0)).round() as i32,
+            height: (self.phys.1 as f32 / self.window.scale().max(1.0)).round() as i32,
+            docked: self.docked,
+            dock_side: self.dock_side,
+            pinned: self.pinned,
+            name: None, // 装配层自己那份记录里已经有名字，别用这里覆盖它
+            base_color: String::new(),
+        };
+        w.normalize();
+        w
     }
 
-    /// 窗口位置与尺寸（屏幕物理像素）。
-    #[allow(dead_code)]
-    pub fn geometry(&self) -> Geometry {
-        self.window.geometry()
+    /// 吸附跟随：主窗口动了，把它摆到该在的位置。
+    ///
+    /// 返回是否真的移动了。**由装配层在主窗口 `Moved` / `Resized` 时调用**，
+    /// 事件驱动、没有定时器。
+    ///
+    /// 三种情况直接不动：
+    /// * 没吸附（用户拖走过，或者手动关掉了吸附）；
+    /// * 用户正在拖它 —— 这时去摆它就是和用户抢鼠标；
+    /// * 拿不到显示器工作区（见 `dock::dock_position`）。
+    ///
+    /// 位置没变时也直接返回：主窗口移动会连发很多条 `WM_MOVE`，
+    /// 每次都调一遍 `SetWindowPos` 是没必要的系统调用。
+    pub fn follow_dock(&mut self, main: Rect, work: Option<Rect>) -> bool {
+        if !self.docked || self.drag_start.is_some() {
+            return false;
+        }
+        let req = DockRequest {
+            main,
+            size: self.phys,
+            side: self.dock_side,
+            work,
+        };
+        let Some(d) = dock::dock_position(&req) else {
+            return false;
+        };
+        if self.last_pos == Some((d.x, d.y)) {
+            return false;
+        }
+        self.window.move_to(d.x, d.y);
+        self.last_pos = Some((d.x, d.y));
+        true
+    }
+
+    /// 用户拖完 / 缩放完松手了。
+    ///
+    /// ## 怎么区分"用户拖动"与"程序吸附"（这一步最容易做坏的地方）
+    ///
+    /// **`WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` 只有系统进入模态移动/缩放循环时
+    /// 才会发**，也就是说只有用户真的抓住标题栏或边框才会来。程序自己调
+    /// `SetWindowPos`（吸附跟随走的就是它）**不会**产生这两个消息。
+    ///
+    /// 所以判据是：只在"用户拖完之后"比较几何 —— 程序摆的那些从来没进过
+    /// 这一段，就不可能被误判成用户拖动。**不靠时间窗口、不靠在 SetWindowPos
+    /// 前后打标志**：前者是拿时序猜，后者一旦漏配对（异常路径、嵌套拖动）
+    /// 就会让窗口莫名其妙脱离吸附。
+    ///
+    /// 位置变了 = 用户在**移动**它 → 脱离吸附；
+    /// 只有尺寸变了 = 用户在**缩放**它 → 保持吸附（并记下新尺寸）。
+    fn on_user_size_move_end(&mut self) {
+        let Some((sx, sy, _, _)) = self.drag_start.take() else {
+            return;
+        };
+        let (x, y) = self.window.position();
+        // 尺寸始终以客户区为准（缩放会改它，移动不会）
+        self.phys = self.window.client_size();
+        let moved = x != sx || y != sy;
+
+        if self.docked && moved {
+            // 需求："弹窗被拖动就脱离吸附，松手后按自由位置保存。"
+            self.docked = false;
+            crate::diag::log(&format!("脱离吸附: {}", self.tab_key));
+        }
+        self.last_pos = Some((x, y));
+        // 落盘：位置/尺寸/吸附状态都可能变了，而状态归装配层管。
+        // 放在动作之后调一次（不是每帧），所以不会变成写盘风暴。
+        crate::popout::report::report_changed(&self.tab_key);
+    }
+
+    /// 吸附按钮：开 / 关。
+    ///
+    /// **刻意不在这里算吸附位置**：那需要主窗口矩形与显示器工作区，而这是
+    /// 装配层的信息（窗口层不该反向依赖它）。这里只翻状态并回报；
+    /// 装配层收到回报后会立刻跑一次跟随，所以开的那一瞬间就会贴上去 ——
+    /// 不会出现"点了要等主窗口动一下才生效"。
+    pub fn toggle_dock(&mut self) -> bool {
+        self.docked = !self.docked;
+        // 清掉"上次摆在哪"，逼装配层这次的跟随真的摆一次：
+        // 用户可能把窗口拖回吸附位、再点开吸附，那样位置恰好相等，
+        // 不清就会因为"没变"而跳过。
+        self.last_pos = None;
+        crate::diag::log(&format!(
+            "弹窗吸附: {} ({})",
+            if self.docked { "开" } else { "关" },
+            self.tab_key
+        ));
+        crate::popout::report::report_changed(&self.tab_key);
+        true
+    }
+
+    /// 钉住按钮：开 / 关（只管"主窗口收起时留不留着"）。
+    pub fn toggle_pin(&mut self) -> bool {
+        self.pinned = !self.pinned;
+        crate::diag::log(&format!(
+            "钉住: {} ({})",
+            if self.pinned { "开" } else { "关" },
+            self.tab_key
+        ));
+        crate::popout::report::report_changed(&self.tab_key);
+        true
+    }
+
+    /// 是否吸附中。装配层用它做一次廉价的前置判断（没有吸附中的窗口时
+    /// 连显示器工作区都不必查）。
+    pub fn is_docked(&self) -> bool {
+        self.docked
     }
 
     /// 登记到消息循环（**不进循环**：一个线程只有一个循环）。
@@ -216,10 +366,25 @@ impl Popout {
         self.window.show();
     }
 
-    /// 移动/改变尺寸（吸附跟随、拖动脱离都用它）。
-    #[allow(dead_code)]
-    pub fn set_geometry(&self, g: Geometry) {
-        self.window.set_geometry(g);
+    /// 按主窗口的显隐同步这个窗口。**钉住的窗口完全不受影响。**
+    ///
+    /// 返回是否真的动了（调用方据此决定要不要重画）。
+    /// 用 `is_visible` 判一次再动：`ShowWindow` 每次都发一堆消息，
+    /// 而主窗口显隐是低频动作，这里省下来的是无谓的消息风暴。
+    pub fn sync_visibility(&self, main_visible: bool) -> bool {
+        if self.pinned {
+            // 需求："钉的作用就只是留在桌面，不随主体最小化。"
+            return false;
+        }
+        if self.window.is_visible() == main_visible {
+            return false;
+        }
+        if main_visible {
+            self.window.show();
+        } else {
+            self.window.hide();
+        }
+        true
     }
 
     fn to_logical(&self, x: i32, y: i32) -> (i32, i32) {
@@ -268,6 +433,7 @@ impl Handler for Popout {
                 // 上一次的方格边长：后者是被内容区宽度夹紧过的结果，
                 // 拿它当输入会让"窗口缩窄再放宽"之后方格回不到原尺寸。
                 self.relayout((width as i32, height as i32));
+                self.phys = (width.max(1) as i32, height.max(1) as i32);
                 true
             }
             // DPI 变了（把窗口拖到另一块缩放不同的显示器上）。
@@ -276,11 +442,22 @@ impl Handler for Popout {
             // 位图要按新的物理边长重新提取（键里带着尺寸，所以是另一批键）。
             // `relayout` 一次把两件都做了。
             Event::DpiChanged { .. } => {
-                self.relayout(self.window.client_size());
+                self.phys = self.window.client_size();
+                self.relayout(self.phys);
                 true
             }
             Event::SizeMove { entering } => {
                 self.resizing = entering;
+                if entering {
+                    // 记下"用户开始拖了"以及拖之前的几何。
+                    // 只有用户真的抓标题栏/边框才会有这条事件（见
+                    // `on_user_size_move_end` 的说明），所以这里不必再判来源。
+                    let (x, y) = self.window.position();
+                    let (w, h) = self.phys;
+                    self.drag_start = Some((x, y, w, h));
+                } else {
+                    self.on_user_size_move_end();
+                }
                 true
             }
             Event::MouseMove { x, y } => {
@@ -328,8 +505,16 @@ impl Handler for Popout {
                         self.window.close();
                         false
                     }
-                    // 其余三个按钮（改色 / 吸附 / 钉桌面）是下一步。
-                    // 现在点它们只是不响应 —— 不做假的视觉反馈。
+                    // 三个开关按钮。改色是下一步（独立配色），现在点了不响应 ——
+                    // 不做假的视觉反馈。
+                    Some(TitleButton::Dock) => {
+                        self.press = None;
+                        self.toggle_dock()
+                    }
+                    Some(TitleButton::Pin) => {
+                        self.press = None;
+                        self.toggle_pin()
+                    }
                     Some(_) => {
                         self.press = None;
                         false
@@ -423,6 +608,10 @@ impl Handler for Popout {
             // 判据与绘制共用 `visible_tiles`，两处不会算出不同的范围。
             let visible = self.layout.visible_tiles(self.content.items.len());
             let bitmaps = self.icons.collect(&self.content.items, visible);
+            let states = ButtonStates {
+                docked: self.docked,
+                pinned: self.pinned,
+            };
             let _ = self.painter.draw(
                 &ctx,
                 &mut self.text,
@@ -430,6 +619,7 @@ impl Handler for Popout {
                 &self.scheme,
                 &self.title,
                 self.hover,
+                states,
                 &self.content.items,
                 &bitmaps,
             );

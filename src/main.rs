@@ -517,13 +517,28 @@ fn selftest() -> ExitCode {
             failures.push("尺寸未夹紧");
         }
 
-        // 互斥：手改成 pinned + docked 同时为真时，以 pinned 为准
-        let mut both = PopoutWindow::default();
-        both.pinned = true;
-        both.docked = true;
-        both.normalize();
-        if both.docked {
-            failures.push("pinned 未压过 docked");
+        // `pinned` 与 `docked` 是**正交**的两件事（可见性 vs 位置），
+        // 四种组合都必须原样保留。
+        //
+        // 这里原本测的是"pinned 压过 docked"——那条互斥的依据是
+        // "钉 = 常驻桌面层"，而使用者已把"钉"收窄成"主窗口收起时不跟着隐藏"，
+        // 于是互斥不再成立。留着它的后果不是显示问题，而是**静默改写用户的
+        // 记录**：手写 `pinned = true, docked = true` 会被 `normalize` 抹成
+        // 不吸附，表现是"我明明没拖它，怎么就不吸附了"。
+        let mut lost = 0;
+        for pin in [false, true] {
+            for dock in [false, true] {
+                let mut w = PopoutWindow::default();
+                w.pinned = pin;
+                w.docked = dock;
+                w.normalize();
+                if w.pinned != pin || w.docked != dock {
+                    lost += 1;
+                }
+            }
+        }
+        if lost > 0 {
+            failures.push("钉住×吸附 的四种组合未被原样保留");
         }
 
         // get 不能写入（否则 state.toml 会随访问长大）
@@ -563,9 +578,153 @@ fn selftest() -> ExitCode {
         println!(
             "弹出窗状态 : {}",
             if failures.is_empty() {
-                "默认值 / 尺寸夹紧 / pinned 压过 docked / get 不写入 / to_open 排序 / retain_tabs / 标题回退 —— 全部通过".to_string()
+                "默认值 / 尺寸夹紧 / 钉住与吸附正交 / get 不写入 / to_open 排序 / retain_tabs / 标题回退 —— 全部通过".to_string()
             } else {
                 format!("⚠ {} 项不通过: {}", failures.len(), failures.join("、"))
+            }
+        );
+    }
+
+    // 吸附跟随的几何。纯算术，能离线把"该贴哪边、放不下怎么翻、主窗口移动后
+    // 位置跟不跟得上、没有显示器信息时怎么办"逐项测死。
+    //
+    // 而"弹窗**真的**跟着动了没有"只能人工验 —— 自检建不出第二个窗口
+    //（前几轮的悬垂指针崩溃、漏 show()、"一个字都不显示"都是这么漏过去的）。
+    {
+        use platform::window::Rect;
+        use popout::dock::{DockRequest, dock_position};
+        use popout::state::DockSide;
+
+        let work = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let main = Rect {
+            x: 100,
+            y: 100,
+            w: 400,
+            h: 800,
+        };
+        let size = (320, 420);
+        let mut failures: Vec<String> = Vec::new();
+        let pos = |m: Rect, side: DockSide, w: Option<Rect>| {
+            dock_position(&DockRequest {
+                main: m,
+                size,
+                side,
+                work: w,
+            })
+        };
+
+        // 右吸附：弹窗左边缘贴主窗口右边缘（100+400=500），顶部对齐（100）
+        match pos(main, DockSide::Right, Some(work)) {
+            Some(d) if (d.x, d.y, d.side) == (500, 100, DockSide::Right) => {}
+            other => failures.push(format!("右吸附应为 (500,100,Right)，实为 {other:?}")),
+        }
+
+        // 右侧放不下 → 翻到左侧：主窗口右边缘 1700+400=2100，2100+320 越界
+        let at_right = Rect {
+            x: 1700,
+            y: 100,
+            w: 400,
+            h: 800,
+        };
+        match pos(at_right, DockSide::Right, Some(work)) {
+            Some(d) if (d.x, d.y, d.side) == (1380, 100, DockSide::Left) => {}
+            other => failures.push(format!("右侧放不下应翻到左侧 (1380,100,Left)，实为 {other:?}")),
+        }
+
+        // 左侧放不下 → 翻回右侧（期望左侧，但左边出界）
+        let at_left = Rect {
+            x: 10,
+            y: 100,
+            w: 400,
+            h: 800,
+        };
+        match pos(at_left, DockSide::Left, Some(work)) {
+            Some(d) if (d.x, d.side) == (410, DockSide::Right) => {}
+            other => failures.push(format!("左侧放不下应翻回右侧 (410,Right)，实为 {other:?}")),
+        }
+
+        // 两侧都放不下：保持**期望的侧**，但必须夹进工作区 ——
+        // 宁可和主窗口重叠，也不能把窗口推出屏幕（工作区 1000 宽、主窗口占 900）
+        let narrow = Rect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 1080,
+        };
+        let wide_main = Rect {
+            x: 0,
+            y: 0,
+            w: 900,
+            h: 600,
+        };
+        match pos(wide_main, DockSide::Right, Some(narrow)) {
+            Some(d) if (d.x, d.side) == (680, DockSide::Right) => {}
+            other => failures.push(format!("两侧都放不下应夹到 680/Right，实为 {other:?}")),
+        }
+
+        // 垂直夹紧：主窗口贴到工作区下边时，整窗仍要可见（1080-420=660）
+        let low = Rect {
+            x: 100,
+            y: 900,
+            w: 400,
+            h: 800,
+        };
+        match pos(low, DockSide::Right, Some(work)) {
+            Some(d) if d.y == 660 => {}
+            other => failures.push(format!("垂直应夹到 y=660，实为 {other:?}")),
+        }
+
+        // 主窗口移动 → 位置跟着平移 200（"跟随"这件事的最小证据）
+        let moved = Rect {
+            x: 300,
+            y: 100,
+            w: 400,
+            h: 800,
+        };
+        match (
+            pos(main, DockSide::Right, Some(work)),
+            pos(moved, DockSide::Right, Some(work)),
+        ) {
+            (Some(a), Some(b)) if b.x == a.x + 200 => {}
+            other => failures.push(format!("主窗口右移 200 后弹窗未跟着平移: {other:?}")),
+        }
+
+        // 弹窗比工作区还大：**绝不能 panic**。
+        // 标准库的 `clamp` 在 min>max 时会崩，而这里是能真实发生的
+        //（用户把窗口拉得比屏幕还大 / 工作区被竖排任务栏切窄）。
+        let tiny = Rect {
+            x: 10,
+            y: 20,
+            w: 200,
+            h: 200,
+        };
+        let small_main = Rect {
+            x: 0,
+            y: 0,
+            w: 50,
+            h: 50,
+        };
+        match pos(small_main, DockSide::Right, Some(tiny)) {
+            Some(d) if (d.x, d.y) == (10, 20) => {}
+            other => failures.push(format!("超宽窗口应退化成贴左上角 (10,20)，实为 {other:?}")),
+        }
+
+        // 拿不到工作区 → 不给位置（调用方保持原位），而不是猜一个坐标
+        if pos(main, DockSide::Right, None).is_some() {
+            failures.push("没有显示器工作区时仍给出了位置".to_string());
+        }
+
+        println!(
+            "吸附跟随   : {}",
+            if failures.is_empty() {
+                "右吸附 / 右放不下翻左 / 左放不下翻右 / 两侧都放不下夹紧 / 垂直夹紧 / 移动跟随 / 超宽不 panic / 无工作区不摆 —— 全部通过（逐项比对期望值）".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
             }
         );
     }
