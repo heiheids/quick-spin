@@ -11,6 +11,7 @@ use windows_numerics::Vector2;
 
 use crate::config::theme::Scheme;
 use crate::error::{Result, Win32Ext};
+use crate::platform::hittest::RectI;
 use crate::render::{Role, TextEngine};
 use crate::ui::layout::{LABEL_GAP, LABEL_HEIGHT, Layout, TILE_PADDING};
 use super::{rounded, rounded_i, to_d2d};
@@ -321,6 +322,59 @@ impl Default for GridPainter {
 }
 
 impl GridPainter {
+    /// 画"空白处拖拽框选"的那条选框。
+    ///
+    /// 单独一个方法，而不是给 `draw` 再加一个参数：`draw` 已经有十个参数了，
+    /// 而选框是浮在方格**之上**的一层，和方格的绘制没有先后依赖。
+    ///
+    /// 代价是要自己再压一次内容区裁剪：选框可以拖到侧栏上去，
+    /// 不裁剪就会在侧栏上画出一条半透明带子。
+    pub fn draw_marquee(
+        &self,
+        ctx: &ID2D1DeviceContext,
+        layout: &Layout,
+        scheme: &Scheme,
+        rect: RectI,
+    ) -> Result<()> {
+        let Some(brush) = &self.brush else {
+            return Ok(());
+        };
+        let no_style: Option<&ID2D1StrokeStyle> = None;
+
+        let clip = D2D_RECT_F {
+            left: layout.content.x as f32,
+            top: layout.content.y as f32,
+            right: (layout.content.x + layout.content.w) as f32,
+            bottom: (layout.content.y + layout.content.h) as f32,
+        };
+        // SAFETY: COM 调用；裁剪结构体是栈上局部量。
+        unsafe {
+            ctx.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        }
+        // RAII 保证出栈（与 `draw` 里同样的理由：中途 `?` 返回也不能漏，
+        // 漏了裁剪栈就失衡，之后所有绘制都被上一次的矩形限制住）。
+        let _clip_guard = ClipGuard(ctx);
+
+        let r = D2D_RECT_F {
+            left: rect.x as f32,
+            top: rect.y as f32,
+            right: (rect.x + rect.w) as f32,
+            bottom: (rect.y + rect.h) as f32,
+        };
+        // SAFETY: COM 调用；颜色与矩形都是栈上局部量。
+        unsafe {
+            // 底：强调色压到很低的透明度。**不能再浓** —— 它是盖在图标上的，
+            // 浓了就看不清框里到底框住了哪几个图标，而"框住了谁"正是框选
+            // 唯一要说清的事。
+            brush.SetColor(&to_d2d(scheme.accent.with_alpha(0x33)));
+            ctx.FillRectangle(&r, brush);
+            // 边：不透明的强调色 + 1px。边界要清楚，否则看不出框到哪为止。
+            brush.SetColor(&to_d2d(scheme.accent));
+            ctx.DrawRectangle(&r, brush, 1.0, no_style);
+        }
+        Ok(())
+    }
+
     /// 画就地编辑的文本框。
     ///
     /// 放在这里而不是单开一个绘制器：本类型已经持有一支实色笔刷，

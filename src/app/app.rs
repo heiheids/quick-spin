@@ -155,6 +155,52 @@ struct TileDrag {
     over_index: Option<usize>,
 }
 
+/// 空白处按住拖出来的选框（框选多选）。
+///
+/// 只在**没有命中任何控件**的空白处起框（见 `App::on_mouse_down`）：
+/// 方格上按下是"拖拽排序 / 单击启动"，那里不能同时兼作框选的起点。
+struct Marquee {
+    /// 起点（逻辑坐标）
+    start: (i32, i32),
+    /// 当前点（逻辑坐标）
+    current: (i32, i32),
+    /// 按下那一刻的选中集。
+    ///
+    /// 框选过程中每一帧的选中集都是「**这份基线** ∪ 框内条目」。
+    /// 必须留基线、而不是往选中集里追加：追加的话框划过再划回来，
+    /// 已经划中的格子会一直亮着，没法"取消划中" —— 而所见即所得
+    /// 正是框选唯一的价值。
+    ///
+    /// 基线同时也承担了 Ctrl 的语义：按下时按着 Ctrl 就以现有选择为基线
+    ///（追加），否则以空集为基线（替换）。
+    base: std::collections::HashSet<String>,
+}
+
+impl Marquee {
+    /// 归一化后的选框矩形（拖拽方向任意，要把左上/右下算回来）。
+    fn rect(&self) -> crate::platform::hittest::RectI {
+        crate::platform::hittest::RectI::new(
+            self.start.0.min(self.current.0),
+            self.start.1.min(self.current.1),
+            (self.start.0 - self.current.0).abs(),
+            (self.start.1 - self.current.1).abs(),
+        )
+    }
+
+    /// 是否只是"点了一下"，而不是真的划出了框。
+    ///
+    /// 用几像素的阈值区分：低于它就不当框选处理。否则在方格之间点一下，
+    /// 那个 0×0 的框会与紧邻的方格相切，于是"点空白"顺带选中了旁边一条，
+    /// 用户会觉得莫名其妙。
+    fn is_click(&self) -> bool {
+        (self.start.0 - self.current.0).abs() < MARQUEE_MIN
+            && (self.start.1 - self.current.1).abs() < MARQUEE_MIN
+    }
+}
+
+/// 承认"这是一次框选"所需的最小拖动距离（逻辑像素）。与方格拖拽同一量级。
+const MARQUEE_MIN: i32 = 3;
+
 /// 方格拖拽的启动阈值（逻辑像素）。与侧栏选项卡排序用的是同一个量级。
 ///
 /// 没有它的话，"按下即拖拽"会把**每一次普通单击**都吞掉 ——
@@ -355,6 +401,12 @@ pub struct App {
     /// 松手时会被重排逻辑读走。共用一个字段的话，一次方格拖拽结束留下的落点
     /// 会让紧接着的一次选项卡点击被当成"拖到这一位"，顺序莫名其妙地变了。
     tile_drop: Option<usize>,
+
+    /// 空白处框选（多选）的进行中状态；`None` = 没在框选。
+    ///
+    /// 与 `tile_drag` **互斥**：一个从方格上起手、一个从空白处起手，
+    /// 不可能同时存在。两者的落点处理也因此互不干扰。
+    marquee: Option<Marquee>,
 
     /// 正在录制全局热键。
     ///
@@ -613,6 +665,7 @@ impl App {
             selected: std::collections::HashSet::new(),
             tile_drag: None,
             tile_drop: None,
+            marquee: None,
             menu_anchor: (0, 0),
             resizing: false,
         })
@@ -1051,6 +1104,9 @@ impl App {
         self.selected.clear();
         self.tile_drag = None;
         self.tile_drop = None;
+        // 框选状态也要一起清：`refresh_view` 会在视图内容集变化时调用本函数，
+        // 留着一个指向旧方格的框，松手时就会按**过期的几何**去选条目。
+        self.marquee = None;
     }
 
     /// 可见下标 → 覆盖表键。
@@ -1925,6 +1981,20 @@ impl App {
                     drop_slot,
                     opacity,
                 )?;
+
+                // 框选矩形画在方格**之上**（`draw_marquee` 自己会再压一次内容区
+                // 裁剪 —— 选框能拖到侧栏上去，不裁剪会在侧栏上画出一条带子）。
+                //
+                // 只在真划出面积时画：刚按下还没拖的时候画一个 0×0 的框，
+                // 会在鼠标位置闪出一个点。
+                if let Some(m) = self.marquee.as_ref().filter(|m| !m.is_click()) {
+                    self.grid.draw_marquee(
+                        self.renderer.context(),
+                        &self.layout,
+                        &scheme,
+                        m.rect(),
+                    )?;
+                }
             }
             // 标题栏底边的分隔线。**必须在方格之后画** ——
             // 方格框上边缘正好压在这条线上，先画会被方格的底色盖掉。
@@ -3013,6 +3083,16 @@ impl App {
     fn on_mouse_down(&mut self, x: i32, y: i32) -> bool {
         let (lx, ly) = self.to_logical(x, y);
 
+        // Ctrl 状态**现读**，不自己记按键序列。
+        //
+        // 用户完全可能先按住 Ctrl、再从别的窗口切回来点我们 ——
+        // 那些 Ctrl 的按下动作发生在我们窗口之外，我们收不到，
+        // 自己记账就会把"想多选"判成"想启动"，一点就弹出一串程序。
+        //
+        // 在函数入口读一次就够：下面方格分支与空白分支都在**同一次按下**里用，
+        // 中途不可能变。
+        let ctrl = crate::platform::hotkey::current_modifiers().ctrl;
+
         // 任何一次**新的按下**都终结上一次的方格拖拽状态。
         //
         // 第二道保险（第一道在 `Event::MouseLeave`）：方格拖拽没有 `SetCapture`，
@@ -3022,6 +3102,9 @@ impl App {
         // 保证"拖拽状态的生命周期绝不跨过两次按下"。
         self.tile_drag = None;
         self.tile_drop = None;
+        // 框选同理，而且风险更大：残留的框会在下一次松手时按**过期的几何**
+        // 重算选中集，把用户没碰过的条目选进来。
+        self.marquee = None;
 
         // 点击别处 = 提交。
         //
@@ -3176,13 +3259,6 @@ impl App {
         }
 
         if let Some(index) = self.layout.tile_at(lx, ly) {
-            // Ctrl 状态**现读**，不自己记按键序列。
-            //
-            // 用户完全可能先按住 Ctrl、再从别的窗口切回来点我们 ——
-            // 那些 Ctrl 的按下动作发生在我们窗口之外，我们收不到，
-            // 自己记账就会把"想多选"判成"想启动"，一点就弹出一串程序。
-            let ctrl = crate::platform::hotkey::current_modifiers().ctrl;
-
             if let Some(key) = self.tile_key_at(index) {
                 if ctrl {
                     // Ctrl + 点击 = 切换这一条的选中态（资源管理器行为）。
@@ -3224,8 +3300,35 @@ impl App {
                 return true;
             }
         }
-        // 没点到任何控件时，若刚才提交过编辑，仍然需要重绘
-        committed
+        // ---- 空白处：单击取消选择，按住拖动则框选 ----
+        //
+        // 走到这里说明没有命中任何控件（方格、选项卡、标题栏按钮、设置按钮、
+        // 菜单项都没中）。这条分支就是"点击空白处"的落地处。
+        //
+        // **按下即清**，不是等松手 —— 这是资源管理器的语义，也让拖框时立刻
+        // 能看到"从空白开始重选"。按着 Ctrl 则不清：那是"在现有选择上追加"，
+        // 清掉就变成替换了。
+        let base = if ctrl {
+            self.selected.clone()
+        } else {
+            std::collections::HashSet::new()
+        };
+        let cleared = !ctrl && !self.selected.is_empty();
+        self.selected = base.clone();
+
+        // 只在**网格内容区**里起框。在侧栏空白处或标题栏下沿拖拽不该拉出选框 ——
+        // 那里没有方格可选，拉出来的框只会盖住界面。
+        if self.layout.content.contains(lx, ly) {
+            self.marquee = Some(Marquee {
+                start: (lx, ly),
+                current: (lx, ly),
+                base,
+            });
+        }
+
+        // 清空过选中集就必须重绘：否则方格上的选中态要等到下一次鼠标移动
+        // 才顺带消失，看着像"点了空白没反应"。
+        cleared || committed
     }
 
     /// 鼠标抬起。
@@ -3238,6 +3341,20 @@ impl App {
     /// 代价是单击的响应晚了"松开鼠标"这一下 —— 实测无感，而拖拽从"不能用"
     /// 变成"能用"，这笔交易是划算的。
     fn on_mouse_up(&mut self, x: i32, y: i32) -> bool {
+        // ---- 空白处框选：抬起即定稿 ----
+        //
+        // 每一帧的 `selected` 已经算成「基线 ∪ 框内」了（见 `on_mouse_move`），
+        // 所以这里**不用**再算一次。只有"其实是一次点击"那种情况要补一下：
+        // 拖出去又拖回来时，最后算出来的选中集还停在鼠标划过的位置，
+        // 恢复成基线才对。
+        if let Some(m) = self.marquee.take() {
+            if m.is_click() {
+                self.selected = m.base;
+            }
+            // 无论如何都要重绘：松手后那条选框线必须消失。
+            return true;
+        }
+
         // ---- 方格：拖拽落点 或 单击启动 ----
         //
         // 先 `take` 出来处理：下面任何一条路径都不该留着这个状态，
@@ -3473,6 +3590,40 @@ impl App {
             return changed;
         }
 
+        // ---- 空白处框选中 ----
+        //
+        // 与方格拖拽一样放在悬停处理**之前**并独占这一步：拖框时鼠标会划过
+        // 一个又一个方格，让下面的悬停逻辑照常跑会点亮途经的格子，
+        // 看起来像"框选把经过的东西都选中了"。
+        if let Some(m) = self.marquee.as_mut() {
+            if (lx, ly) == m.current {
+                return false;
+            }
+            m.current = (lx, ly);
+        }
+        if let Some(m) = self.marquee.as_ref() {
+            // 还没划出面积就当点击处理：此时`selected` 已经等于基线
+            //（按下时设好的），不必每移动一像素就重算一遍。
+            if m.is_click() {
+                return false;
+            }
+            let rect = m.rect();
+            // 每帧从**基线**重算，而不是往选中集里追加：
+            // 追加的话框划过再划回来，格子会一直亮着，没法"取消划中"。
+            let mut next = m.base.clone();
+            let first = self.layout.first_item;
+            for (i, tile) in self.layout.tiles.iter().enumerate() {
+                if tile.intersects(&rect) {
+                    if let Some(key) = self.tile_key_at(first + i) {
+                        next.insert(key);
+                    }
+                }
+            }
+            let changed = next != self.selected;
+            self.selected = next;
+            return changed;
+        }
+
         // 正在拖动侧栏按钮：只更新落点提示，不做别的悬停处理。
         // 否则拖动过程中会顺带点亮途经的方格，看起来像误触。
         if let Some(from) = self.dragging_tab {
@@ -3601,9 +3752,13 @@ impl Handler for App {
                 // 任何一次松手都会被当成"落点在这里"，把一整个选中集悄悄挪到
                 // 别的分组去。取消掉是唯一不会出错的处理。
                 let drag = self.tile_drag.take().is_some();
+                // 框选同样取消。留着的话选框会跟着光标在窗口外乱飘，
+                // 而且下一次在窗口里松手会按一个过期的框去选条目。
+                let marquee = self.marquee.take().is_some();
                 self.tile_drop = None;
 
                 let changed = drag
+                    || marquee
                     || self.hover_caption.is_some()
                     || self.hover_tab.is_some()
                     || self.hover_tile.is_some()

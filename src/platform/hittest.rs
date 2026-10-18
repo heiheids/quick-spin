@@ -31,6 +31,21 @@ impl RectI {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
 
+    /// 两个矩形是否**相交**（相切也算）。
+    ///
+    /// 框选多选用它判断"这个方格被选框划到了没"。用相交而不是包含：
+    /// 用户只要划到方格的一角就该选中它 —— 要求整个方格都被框住的话，
+    /// 方格和图标一样大，随手一划几乎选不中任何东西。
+    ///
+    /// 宽或高为 0 的"线状框"同样有效（纯竖直/水平拖动也要能选中），
+    /// 因为这里是半开区间比较，不是先算面积。
+    pub const fn intersects(&self, other: &Self) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+
     /// 转成绘制层要用的 `(left, top, width, height)` 浮点矩形。
     pub fn as_f32(self) -> (f32, f32, f32, f32) {
         (self.x as f32, self.y as f32, self.w as f32, self.h as f32)
