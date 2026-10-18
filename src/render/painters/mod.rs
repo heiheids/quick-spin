@@ -60,3 +60,33 @@ pub fn rounded_i(rect: RectI, radius: f32) -> D2D1_ROUNDED_RECT {
         radius,
     )
 }
+
+/// 描边矩形：把 `(left, top, right, bottom)` **四边各内缩半个线宽**。
+///
+/// ## 为什么必须有这个函数（2026-10-18）
+///
+/// D2D 的描边是**以路径为中心**向两侧各画一半。矩形正好压在窗口边界上时，
+/// 外侧那一半会溢出到窗口外被裁掉（描边看起来细一半，玻璃关闭时尤其明显）。
+/// 所以描边矩形要向内缩半个线宽 —— 这条规则原先在**两处各写了一份**：
+/// 主窗口的 `panel.rs`（对的）与弹窗的 `popout/layout.rs`（写错了）。
+///
+/// 写错的那份把元组当成 `(left, top, width, height)` 来填，
+/// 而消费方 `rounded()` 要的是 `right/bottom`，于是右/下多缩了半个线宽、
+/// **描边不对称** —— 使用者报的"弹窗底部两角有浅色边"就是这个。
+/// 对的那份**拦不住错的那份**，所以规则只能有一处（架构文档 §17.9 / §17.14）。
+///
+/// 与 [`inset_stroke_radius`] 分开成两个函数，是因为调用方需要它们的**时机不同**：
+/// 弹窗算布局时还不知道半径（半径来自装配层的配色），所以只能先要矩形。
+/// 硬合成一个"返回一对"的函数会逼出"传个假半径、只取一半结果"的写法。
+pub fn inset_stroke_rect(rect: (f32, f32, f32, f32), stroke_width: f32) -> (f32, f32, f32, f32) {
+    let half = stroke_width / 2.0;
+    (rect.0 + half, rect.1 + half, rect.2 - half, rect.3 - half)
+}
+
+/// 描边半径：与 [`inset_stroke_rect`] 缩同样的量。
+///
+/// 内缩了多少，半径就减多少 —— 这样描边的**中线**与填充轮廓**同心**，
+/// 转角处不会一边贴着填充、一边留缝。减到负值没有意义，夹到 0。
+pub fn inset_stroke_radius(radius: f32, stroke_width: f32) -> f32 {
+    (radius - stroke_width / 2.0).max(0.0)
+}

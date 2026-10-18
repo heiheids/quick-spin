@@ -230,15 +230,10 @@ impl PopoutLayout {
             // 而不是 0.6 —— 描边不对称，缺口全落在底部与右侧。
             // 这个错**骗得过"没越出客户区"那类断言**（错的版本更保守），
             // 所以自检查的是"四个内缩量彼此相等"。
-            panel_stroke: {
-                let half = PANEL_STROKE / 2.0;
-                (
-                    half,
-                    half,
-                    (width as f32 - half).max(0.0),
-                    (height as f32 - half).max(0.0),
-                )
-            },
+            panel_stroke: crate::render::painters::inset_stroke_rect(
+                (0.0, 0.0, width as f32, height as f32),
+                PANEL_STROKE,
+            ),
             title_bar,
             title_text,
             buttons,
@@ -253,8 +248,11 @@ impl PopoutLayout {
     ///
     /// 内缩了多少，半径就减多少 —— 这样描边的中线与面板填充的轮廓**同心**，
     /// 转角处不会出现"一边贴着填充、一边留缝"。减到负值没有意义，夹到 0。
+    ///
+    /// **公式在 `render::painters::inset_stroke_radius`，与主窗口共用同一处。**
+    /// 这里只是转发：半径来自装配层的配色，算布局时还不知道，所以只能这时候要。
     pub fn panel_stroke_radius(&self, panel_radius: f32) -> f32 {
-        (panel_radius - PANEL_STROKE / 2.0).max(0.0)
+        crate::render::painters::inset_stroke_radius(panel_radius, PANEL_STROKE)
     }
 
     /// 第 `index` 个方格的位置（逻辑像素，左上角）。

@@ -272,10 +272,12 @@ impl PanelPainter {
             // 玻璃关闭时面板铺满窗口，这个问题尤其明显 —— 描边会细一半。
             if scheme.border_width > 0.0 {
                 if let Some(brush) = &self.edge_brush {
-                    let half = scheme.border_width / 2.0;
+                    // 内缩半个线宽、半径同缩同一量：公式在 `inset_stroke_rect` /
+                    // `inset_stroke_radius`，与弹窗共用同一处（原先两处各写一份，
+                    // 弹窗那份写错了元组语义，见 `mod.rs` 里那两个函数的说明）。
                     let stroke_rect = rounded(
-                        (left + half, top + half, right - half, bottom - half),
-                        (radius - half).max(0.0),
+                        crate::render::painters::inset_stroke_rect(rect, scheme.border_width),
+                        crate::render::painters::inset_stroke_radius(radius, scheme.border_width),
                     );
                     ctx.DrawRoundedRectangle(&stroke_rect, brush, scheme.border_width, no_style);
                 }
