@@ -468,6 +468,22 @@ fn selftest() -> ExitCode {
                 "  ⚠ 有图标每帧都在重试！加载线程会一直做白工"
             }
         );
+
+        // 框选拖动时"每次移动是否都请求了重绘"。这是选框流畅度的直接判据。
+        //
+        // 期望 `asked` 与 `steps` 基本相等：前几步位移还在 `MARQUEE_MIN`（3px）
+        // 阈值内，那时选框还没开始画，不请求重绘是对的，所以允许差一两次。
+        let (steps, asked) = app.selftest_marquee_redraws(60);
+        println!(
+            "框选重绘率 : {asked}/{steps} 次移动请求了重绘{}",
+            if steps == 0 {
+                "（跳过：内容区左下角被方格占住了）"
+            } else if asked * 10 >= steps * 9 {
+                "（正常：选框会跟着鼠标连续移动）"
+            } else {
+                "  ⚠ 多数移动没请求重绘，选框会一格一跳"
+            }
+        );
     }
 
     println!(

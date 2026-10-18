@@ -987,6 +987,43 @@ impl App {
         self.icon_requests.saturating_sub(before)
     }
 
+    /// 自检用：模拟一次"空白处框选拖动"，返回 `(移动次数, 其中请求了重绘的次数)`。
+    ///
+    /// 这条判定直接对应"选框流畅不流畅"：拖动期间**每一次移动都必须请求重绘**，
+    /// 因为选框本身要跟着鼠标走。若只在"选中集发生变化"时才请求重绘，
+    /// 选框就会停在原地、直到划到下一个方格才跳一下 —— 实测每秒只画 12 帧，
+    /// 而处理每次移动只花 0.01ms，即"既不忙也不动"。
+    pub fn selftest_marquee_redraws(&mut self, steps: usize) -> (usize, usize) {
+        let scale = self.window.scale();
+        // 逻辑坐标 → 物理坐标（`on_mouse_*` 收的是物理坐标）
+        let phys = |lx: i32, ly: i32| {
+            (((lx as f32) * scale) as i32, ((ly as f32) * scale) as i32)
+        };
+
+        // 起点取内容区左下角的空白处：方格从上往下填，那里通常没有方格。
+        let content = self.layout.content;
+        let (x0, y0) = (content.x + 6, content.y + content.h - 8);
+        if self.layout.tile_at(x0, y0).is_some() {
+            // 万一那里真有方格（条目很多），就退回"不测"而不是给出假数据
+            return (0, 0);
+        }
+        let (px, py) = phys(x0, y0);
+        let _ = self.on_mouse_down(px, py);
+
+        let steps = steps.max(1);
+        let mut asked = 0;
+        for i in 1..=steps {
+            // 向右上小幅移动，始终不出内容区
+            let (mx, my) = phys(x0 + i as i32 * 2, y0 - i as i32);
+            if self.on_mouse_move(mx, my) {
+                asked += 1;
+            }
+        }
+        let (ex, ey) = phys(x0 + steps as i32 * 2, y0 - steps as i32);
+        let _ = self.on_mouse_up(ex, ey);
+        (steps, asked)
+    }
+
     /// 采纳扫描结果。
     fn adopt_scan(&mut self, report: ScanReport) {
         // 先记下"这一批之前就已存在的条目"，用来分辨哪些是**真正新加的**。
@@ -3781,9 +3818,19 @@ impl App {
                     }
                 }
             }
-            let changed = next != self.selected;
             self.selected = next;
-            return changed;
+
+            // **必须无条件请求重绘**，不能按"选中集有没有变"来决定。
+            //
+            // 选框是**跟着鼠标走**的图形，位置每一帧都在变；而"选中集变没变"
+            // 完全是另一回事。按后者决定重绘的话，鼠标在同一片区域内移动时
+            // 选框会**停在原地**，直到划到下一个方格才跳一下 ——
+            // 实测每秒只画 12 帧，而每次移动的处理耗时仅 0.01ms：
+            // 既不忙、也不动，那就是"不流畅"。
+            //
+            // 这条也曾把上一次"拖动卡顿"的排查带偏：日志里那 95% 的空闲时间
+            // 就是"根本没请求重绘"造成的，并不是真的省下了什么。
+            return true;
         }
 
         // 正在拖动侧栏按钮：只更新落点提示，不做别的悬停处理。
