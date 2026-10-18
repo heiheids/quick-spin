@@ -768,6 +768,23 @@ fn selftest() -> ExitCode {
         if palette_index("  #0A1A2F  ") != Some(0) {
             failures.push("带空白的基础色应当照常识别".to_string());
         }
+        // 下标 → 文本 → 下标 必须往返一致：选色时走"格子下标 → 写进状态的文本"，
+        // 高亮时走"状态里的文本 → 格子下标"。两步用不同的表（一个过滤、一个不
+        // 过滤）就会错位 —— 表现是"点了 A 格，高亮的是 B 格"。
+        let mut hexes: Vec<&str> = Vec::new();
+        for i in 0..colors.len() {
+            match config::theme::palette_hex(i) {
+                Some(h) if palette_index(h) == Some(i) => hexes.push(h),
+                Some(h) => failures.push(format!("第 {i} 格取到的 {h} 反而指回别处")),
+                None => failures.push(format!("第 {i} 格取不到十六进制文本")),
+            }
+        }
+        if hexes.len() == BASE_PALETTE.len() && hexes != BASE_PALETTE.to_vec() {
+            failures.push("下标取到的文本顺序与色板常量不一致".to_string());
+        }
+        if config::theme::palette_hex(colors.len()).is_some() {
+            failures.push("越界的下标不该取到文本".to_string());
+        }
 
         // ---- "用哪套配色"的规则 ----
         let main = config::Scheme::from_base(config::Color::from_hex("#159AA4").unwrap());
