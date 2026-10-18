@@ -70,3 +70,20 @@ $size = [math]::Round((Get-Item $exe).Length / 1KB, 1)
 Write-Host ""
 Write-Host "构建完成：$exe  ($size KB)" -ForegroundColor Green
 Write-Host "已校验：不含本机用户名与用户目录路径。" -ForegroundColor Green
+
+# ---- 3. 同步说明书到产物目录 ----
+#
+# 程序设置面板里的「使用说明」打开的是 **exe 旁边**那份（便携布局：数据与程序同级），
+# 而源文件在 `assets\使用说明.txt`。这两份原先靠手工拷贝维持，于是必然漂移 ——
+# 实测过一次：`assets\` 那份已经写了弹出子窗口，而 `target\release\` 那份还是几小时前的
+# 旧版，在程序里点「使用说明」看到的是过时内容。
+#
+# 放在构建脚本里，是因为"只要构建过，本地那份就是最新的"比"记得手动拷"可靠。
+# 发布包（package-release.ps1）本身直接取 `assets\` 那份，不受这一步影响。
+$manualSrc = Join-Path $root 'assets\使用说明.txt'
+$manualDst = Join-Path $root 'target\release\使用说明.txt'
+if (-not (Test-Path $manualSrc)) { throw "找不到说明书源文件：$manualSrc" }
+Copy-Item $manualSrc $manualDst -Force
+if (-not (Test-Path $manualDst)) { throw "说明书拷贝失败：$manualDst" }
+$mSize = (Get-Item $manualDst).Length
+Write-Host "已同步说明书：使用说明.txt ($mSize 字节)" -ForegroundColor Green
