@@ -309,6 +309,15 @@ impl Handler for Popout {
         // `insert` 会触发 LRU 淘汰，边画边淘汰可能把正要画的那张位图释放掉
         //（主窗口 `App::draw` 里有同一条规则的说明）。
         self.icons.poll_and_insert(&ctx);
+        // **文字引擎也要 ensure。**
+        //
+        // 它的笔刷是懒创建的，没建之前 `TextEngine::draw` 会**静默返回**
+        //（`let Some(brush) = self.brush.clone() else { return Ok(()) }`）——
+        // 一个字都不画，也不报错、不留日志。主窗口在 `App::draw` 里调过这一句，
+        // 这个窗口当时漏了，症状就是"图标都在，但标题和名称一个字都没有"。
+        //
+        // 失败不致命（与漏调时的表现相同：没有文字），所以这里不往上抛。
+        let _ = self.text.ensure(&ctx);
         if self.painter.ensure(&ctx).is_ok() {
             // 只给**看得见**的格子取图标：看不见的既不该请求、也不该占缓存。
             // 判据与绘制共用 `visible_tiles`，两处不会算出不同的范围。
