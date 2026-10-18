@@ -6,7 +6,7 @@
 //! `to_lowercase()` 再 `contains`，总耗时也在微秒量级 —— 比建立并维护
 //! 索引（还要处理增删同步）便宜得多。等条目数真的上到几万条再说。
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::config::model::{MAIN_TAB, TabDef};
 use crate::shell::lnk::Shortcut;
@@ -40,7 +40,7 @@ impl Library {
         &self,
         tab: &TabDef,
         query: &str,
-        overrides: &HashMap<String, EntryOverride>,
+        overrides: &BTreeMap<String, EntryOverride>,
     ) -> Vec<usize> {
         let needle = query.trim().to_lowercase();
 
@@ -98,7 +98,7 @@ impl Library {
     pub fn count_in(
         &self,
         tab: &TabDef,
-        overrides: &HashMap<String, EntryOverride>,
+        overrides: &BTreeMap<String, EntryOverride>,
     ) -> usize {
         self.view(tab, "", overrides).len()
     }

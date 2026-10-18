@@ -10,7 +10,7 @@
 //! 之所以要分开：TOML 写入会丢失注释，程序若反复重写 `config.toml`，
 //! 用户手写的注释和排版会被冲干净。
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -92,8 +92,14 @@ pub struct AppState {
     pub hide_after_launch: Option<bool>,
 
     /// 条目覆盖表。键是 `.lnk` 的**完整路径**（见架构文档 §9.2 的取舍说明）。
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub entries: HashMap<String, EntryOverride>,
+    ///
+    /// 用 `BTreeMap` 而不是 `HashMap`：**只为让文件内容稳定**。
+    /// `HashMap` 的迭代顺序由每个进程随机的哈希种子决定，于是每保存一次
+    /// `state.toml` 里 `[entries.*]` 各小节的**书写顺序**都可能变，
+    /// 内容没变而字节全变 —— 自己 diff、外部工具比对、增量备份都会误报。
+    /// `BTreeMap` 按 key 排序输出，改了什么就只动那一处。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub entries: BTreeMap<String, EntryOverride>,
 }
 
 impl AppState {
