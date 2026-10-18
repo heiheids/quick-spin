@@ -30,6 +30,15 @@ pub struct Popout {
     hover: Option<TitleButton>,
     /// 是否正在拖动窗口尺寸
     resizing: bool,
+    /// 要显示的条目名，与主窗口该选项卡的**可见条目**保持同步。
+    ///
+    /// 需求："弹出窗口要同步它在主窗口的内容 —— 弹出只是多了一种显示方式，
+    /// 并不影响本身在主窗口的内容。" 也就是说弹出**不把选项卡从侧栏拿走**，
+    /// 它是同一份数据的第二个视图，数量与顺序必须和主窗口一致。
+    ///
+    /// 这一版先只同步**数量与名称**（画占位方格）：把"同步"这件事本身
+    /// 与图标管线解耦。数量对不上时问题在同步，不在图标，排查范围小一半。
+    content: Vec<String>,
 }
 
 impl Popout {
@@ -57,7 +66,25 @@ impl Popout {
             title: title.to_string(),
             hover: None,
             resizing: false,
+            content: Vec::new(),
         })
+    }
+
+    /// 用主窗口推来的快照更新内容。
+    ///
+    /// 返回内容是否**真的**变了：调用方据此决定要不要请求重绘 ——
+    /// 内容没变还每帧重绘弹出窗口是白耗电。
+    pub fn set_content(&mut self, names: Vec<String>) -> bool {
+        if self.content == names {
+            return false;
+        }
+        self.content = names;
+        true
+    }
+
+    /// 请求重绘一次（内容被推来后调用）。
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
     }
 
     /// 这几个是为**吸附跟随 / 保存位置**准备的（下一步）：
@@ -204,6 +231,7 @@ impl Handler for Popout {
                 &self.scheme,
                 &self.title,
                 self.hover,
+                &self.content,
             );
         }
         let _ = self.renderer.end(if self.resizing { 0 } else { 1 });

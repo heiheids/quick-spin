@@ -496,6 +496,9 @@ pub struct App {
     /// 指针立刻失效 —— 那是未定义行为，而且不一定当场崩。
     popouts: std::collections::BTreeMap<String, Box<crate::popout::window::Popout>>,
 
+    /// 上次推给弹出子窗口时用的内容签名（见 `sync_popouts`）。
+    popout_sync_sig: (usize, usize, f32),
+
     /// 右键菜单。`Some` 表示菜单正展开。
     ///
     /// 它是**最上层**浮层：绘制最后画，点击最先处理。
@@ -796,6 +799,7 @@ impl App {
             hover_settings_button: None,
             exit_requested: false,
             popouts: std::collections::BTreeMap::new(),
+            popout_sync_sig: (usize::MAX, usize::MAX, f32::MAX),
             menu: None,
             menu_hover: None,
             editing: None,
@@ -1464,8 +1468,67 @@ impl App {
         self.window.close();
     }
 
-    /// 打开 / 关闭某选项卡的弹出子窗口（侧栏右键菜单的入口）。
+    /// 把各选项卡的**当前可见条目**推给对应的弹出子窗口。
     ///
+    /// ## 为什么是"推"而不是"共享状态"
+    ///
+    /// 需求："弹出窗口要同步它在主窗口的内容 —— 弹出只是多了一种显示方式，
+    /// 并不影响本身在主窗口的内容。"
+    ///
+    /// 方式 A 下弹出窗口自给自足（不借用主窗口状态），所以两边靠**推快照**
+    /// 保持一致：主窗口内容变了就推一份新的。共享可变状态会引入 `RefCell`
+    /// 与借用别名问题，而弹出窗口每帧自己来拉则是轮询，都更差。
+    ///
+    /// ## 触发判据
+    ///
+    /// 用一个 O(1) 的签名（覆盖数 / 扫描总数 / 图标尺寸）守住，只有它变了才
+    /// 真的重算并推送。这样每帧检查的开销可忽略，也不会漏掉"加了一个图标"。
+    /// 签名覆盖不到的是**同名条目内部的改名与重排**——那两种情况下这三个数
+    /// 都不变。留着，是因为下一步接图标管线时本来就要换成更细的判据，
+    /// 而现在多算一份名称列表只为覆盖这两种情况，代价不成比例。
+    fn sync_popouts(&mut self) {
+        if self.popouts.is_empty() {
+            return;
+        }
+        let sig = (
+            self.state.get().entries.len(),
+            self.library.total(),
+            self.layout.icon_size,
+        );
+        if sig == self.popout_sync_sig {
+            return;
+        }
+        self.popout_sync_sig = sig;
+
+        let overrides = self.state.get().entries.clone();
+        let keys: Vec<String> = self.popouts.keys().cloned().collect();
+        for key in keys {
+            let names: Vec<String> = match self.tabs.iter().find(|t| t.key == key) {
+                Some(tab) => self
+                    .library
+                    // 搜索串传空：弹出窗口没有搜索框，显示的是该选项卡的**全部**
+                    // 可见条目 —— 它与主窗口的差别只在于主窗口可能正被搜索过滤。
+                    .view(tab, "", &overrides)
+                    .into_iter()
+                    .filter_map(|i| self.library.get(i).map(|s| s.name.clone()))
+                    .collect(),
+                None => Vec::new(),
+            };
+            let changed = self
+                .popouts
+                .get_mut(&key)
+                .map(|p| p.set_content(names))
+                .unwrap_or(false);
+            if changed {
+                if let Some(p) = self.popouts.get(&key) {
+                    // 内容变了要让它重画一帧，否则要等到用户去点它才更新。
+                    p.request_redraw();
+                }
+            }
+        }
+    }
+
+    /// 打开 / 关闭某选项卡的弹出子窗口（侧栏右键菜单的入口）。    ///
     /// 返回"是否需要重绘"（菜单项文案会变，所以基本总是要重绘）。
     fn toggle_popout(&mut self, tab_key: &str) -> bool {
         // 已经开着 → 关掉
@@ -4307,6 +4370,10 @@ impl Handler for App {
 
     fn paint(&mut self) {
         let t = std::time::Instant::now();
+        // 先把内容推给活着的弹出子窗口（有变化才会真的重绘它们）。
+        // 放在这里而不是定时器里：内容变化本来就是由"主窗口要重绘"驱动的，
+        // 定时轮询会白耗 CPU。
+        self.sync_popouts();
         let result = self.draw();
         let ms = t.elapsed().as_secs_f32() * 1000.0;
         // 先取标志再调 `sample`：`sample` 要可变借用 `frame_stat`，

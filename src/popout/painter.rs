@@ -210,9 +210,11 @@ impl PopoutPainter {
         Ok(())
     }
 
-    /// 画一帧：面板底 + 标题栏 + 四个图标 + 标题文字。
+    /// 画一帧：面板底 + 标题栏 + 四个图标 + 内容方格 + 标题文字。
     ///
-    /// 图标网格（内容区）本版先不画 —— 条目快照与图标管线是下一步。
+    /// `names` 是要显示的条目名（与主窗口该选项卡的可见条目同步）。
+    /// 这一版画**占位方格 + 名称**，不画图标 —— 图标需要它自己的加载线程与
+    /// 缓存，单独一步做。先把"同步"这件事本身做对。
     pub fn draw(
         &self,
         ctx: &ID2D1DeviceContext,
@@ -221,6 +223,7 @@ impl PopoutPainter {
         scheme: &Scheme,
         title: &str,
         hover: Option<TitleButton>,
+        names: &[String],
     ) -> Result<()> {
         let Some(brush) = &self.brush else {
             return Ok(());
@@ -238,6 +241,24 @@ impl PopoutPainter {
             // ---- 标题栏底色：取渐变的另一端，让它读起来是"一条栏" ----
             brush.SetColor(&to_d2d(scheme.panel.to));
             ctx.FillRectangle(&rect_to_d2d(layout.title_bar), brush);
+
+            // ---- 内容方格（占位：只有底色与名称）----
+            //
+            // 数量与顺序来自主窗口推来的快照，所以两边必须一致 ——
+            // 这正是"弹出只是多了一种显示方式"的可见证据。
+            let row_h = layout.row_height();
+            for i in 0..names.len() {
+                let (tx, ty) = layout.tile_at(i, row_h);
+                // 超出内容区的行先不画（滚动是后续的事）
+                if ty + row_h > layout.content.y + layout.content.h {
+                    break;
+                }
+                brush.SetColor(&to_d2d(scheme.tile_bg));
+                ctx.FillRoundedRectangle(
+                    &rounded_i(RectI::new(tx, ty, layout.tile, layout.tile), 6.0),
+                    brush,
+                );
+            }
 
             // ---- 四个图标 ----
             let colors = clover_colors();
@@ -277,6 +298,29 @@ impl PopoutPainter {
                     }
                 }
             }
+        }
+
+        // ---- 名称（走文本引擎，需要 &mut）----
+        // 与方格一起画：先画完所有方块的底色，再统一排文字，
+        // 避免"方块底色盖住上一个名称"。
+        let row_h = layout.row_height();
+        for (i, name) in names.iter().enumerate() {
+            let (tx, ty) = layout.tile_at(i, row_h);
+            if ty + row_h > layout.content.y + layout.content.h {
+                break;
+            }
+            text.draw(
+                ctx,
+                name,
+                Role::Caption,
+                (
+                    tx as f32 - 4.0,
+                    (ty + layout.tile) as f32,
+                    layout.tile as f32 + 8.0,
+                    16.0,
+                ),
+                scheme.text_primary,
+            )?;
         }
 
         // ---- 标题文字（走文本引擎，需要 &mut）----
