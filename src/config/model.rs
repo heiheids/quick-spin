@@ -99,8 +99,6 @@ pub struct General {
     pub autostart: bool,
     /// 面板置顶
     pub always_on_top: bool,
-    /// 启动后直接进托盘、不显示面板
-    pub start_hidden: bool,
     /// 启动一个快捷方式后自动收起面板
     pub hide_after_launch: bool,
     /// 只允许一个实例（重复启动时唤起已有实例）
@@ -125,7 +123,6 @@ impl Default for General {
         Self {
             autostart: false,
             always_on_top: true,
-            start_hidden: false,
             hide_after_launch: true,
             single_instance: true,
             show_tray: true,
@@ -155,8 +152,6 @@ pub struct Appearance {
     pub opacity: f32,
     /// 面板圆角，逻辑像素。
     pub corner_radius: f32,
-    /// 使用 Win11 系统圆角 API（不支持的版本自动忽略）。
-    pub system_round_corners: bool,
     /// 自定义**基础色**，`#RRGGBB` 形式。留空表示不用自定义配色。
     ///
     /// 非空时它优先于 [`Self::scheme`]：整套主题（侧栏、边框、文字色）
@@ -172,7 +167,6 @@ impl Default for Appearance {
             outer_glass: true,
             opacity: 1.0,
             corner_radius: 16.0,
-            system_round_corners: true,
             // 空 = 不用自定义配色，走 `scheme` 指定的命名方案
             base_color: String::new(),
         }
@@ -196,10 +190,11 @@ pub struct CornerStyle {
 impl Appearance {
     /// 由"外圈玻璃是否生效"推出外框圆角，**这是唯一出处**。
     ///
-    /// 依据是 `outer_glass` 而不是 [`Self::system_round_corners`]：后者在全项目里
-    /// 只出现在定义与默认值处，**从未被读取**（和 `start_hidden` 一样是个空配置项）。
-    /// 这里按主窗口的**实际**行为对齐，而不是顺手把一个空配置项接上 ——
-    /// 那会改变行为，属于要使用者拍板的事。
+    /// 依据是 `outer_glass`：这是主窗口的**实际**行为（`acyclic::apply` 的第 4 个
+    /// 参数一直传的就是它）。2026-10-18 之前这里还有一个 `system_round_corners`
+    /// 配置项，但它在全项目里只出现在定义与默认值处、**从未被读取** ——
+    /// 一个"看起来有用、实际毫无作用"的开关比没有更糟，已连同 `general.start_hidden`
+    /// 一起删除（使用者决定："删掉"）。
     ///
     /// `outer_glass` 为假是"平面模式"：窗口外不申请模糊、不留任何透明区域，
     /// 所以系统圆角也必须一起关掉。
