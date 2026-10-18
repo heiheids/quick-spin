@@ -569,6 +569,14 @@ fn selftest() -> ExitCode {
         );
     }
 
+    // 主窗口标志：决定关闭主窗口时程序退不退出。
+    // 错了不会报错，只是关了窗口进程还在 —— 必须单独验。
+    println!(
+        "多窗口基础 : 主窗口标志 {}；活着的窗口 {} 个",
+        if app.selftest_main_window_flag() { "已置位" } else { "⚠ 未置位（关窗口将不退出）" },
+        app.selftest_live_window_count()
+    );
+
     println!(
         "后台扫描   : 已就绪，共 {} 条；选项卡「{}」显示 {} 条",
         app.scanned_total(),

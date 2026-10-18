@@ -15,6 +15,20 @@
 //! 每个窗口的状态挂在它自己的 `GWLP_USERDATA` 上（见 [`WindowCtx`]），
 //! 而不是用线程局部变量。这样"弹出新窗口"功能可以直接复用，
 //! 不用等到那时再回来重构。
+//!
+//! 线程局部只用来记**有哪些窗口**（[`LIVE_WINDOWS`]），不存任何窗口状态 ——
+//! 那是索引，不是状态，两处并存不会不同步。
+//!
+//! 三条与多窗口相关的约定：
+//!
+//! * **一个线程只有一个消息循环**，所以第二个窗口起不再调用 [`Window::run`]，
+//!   而是用 [`Window::attach`] 登记处理器，由主循环按窗口分派绘制。
+//! * 处理器存的是**裸指针**，因此调用方必须让它地址稳定
+//!   （放进 `Box` 持有）。`Vec` 扩容搬动元素就会留下悬垂指针。
+//! * `WM_DESTROY` 只在**主窗口**上 `PostQuitMessage`。否则关掉一个弹出窗口
+//!   会把整个程序带走。
+
+use std::cell::RefCell;
 
 use windows::Win32::Foundation::{
     GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM, WIN32_ERROR,
@@ -169,6 +183,13 @@ struct WindowCtx {
     dpi: u32,
     /// 是否已向系统登记 `WM_MOUSELEAVE` 跟踪。
     tracking_mouse: bool,
+    /// 是不是**主窗口**。
+    ///
+    /// 只用于一件事：`WM_DESTROY` 时决定要不要 `PostQuitMessage`。
+    /// 主窗口销毁 = 程序退出；弹出窗口销毁只是关掉那个窗口。
+    /// 不用"窗口数量归零"来判断：主窗口关掉时可能还有弹出窗口活着，
+    /// 那种情况下程序必须退出，否则会剩下几个窗口、进程却收不了尾。
+    is_main: bool,
 }
 
 impl WindowCtx {
@@ -179,6 +200,46 @@ impl WindowCtx {
             client: (cx, cy),
             dpi: 96,
             tracking_mouse: false,
+            is_main: false,
+        }
+    }
+}
+
+thread_local! {
+    /// 本线程上**所有活着**的窗口。
+    ///
+    /// 消息循环原本只认一个 hwnd：排空消息队列后统一重绘"那一个"。
+    /// 支持多窗口后，一批消息可能让任意几个窗口变脏，循环需要能枚举它们。
+    ///
+    /// 只存句柄、不存状态 —— 状态仍在各自的 `WindowCtx` 里（模块文档有说明）。
+    static LIVE_WINDOWS: RefCell<Vec<HWND>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 当前活着的窗口数。自检用。
+pub fn live_window_count() -> usize {
+    LIVE_WINDOWS.with(|v| v.borrow().len())
+}
+
+fn register_window(hwnd: HWND) {
+    LIVE_WINDOWS.with(|v| v.borrow_mut().push(hwnd));
+}
+
+fn unregister_window(hwnd: HWND) {
+    LIVE_WINDOWS.with(|v| {
+        let mut v = v.borrow_mut();
+        if let Some(i) = v.iter().position(|h| h.0 == hwnd.0) {
+            v.remove(i);
+        }
+    });
+}
+
+/// 把所有变脏的窗口各画一帧。
+fn paint_dirty_windows() {    // 先取快照再逐个处理：绘制回调里可能创建或销毁窗口
+    //（弹出窗口自己关闭就是），持着 `RefCell` 借用去跑回调会 panic。
+    let snapshot: Vec<HWND> = LIVE_WINDOWS.with(|v| v.borrow().clone());
+    for hwnd in snapshot {
+        if take_dirty(hwnd) {
+            with_handler(hwnd, |h| h.paint());
         }
     }
 }
@@ -287,6 +348,11 @@ impl Window {
             )
         }
         .ctx("CreateWindowExW")?;
+
+        // 登记进"活着的窗口"表。**必须在这里就登记**，不能等 `run`：
+        // 创建到进循环之间窗口已经能收到消息（比如 WM_PAINT），
+        // 那时若不在表里，绘制分派就找不到它。
+        register_window(hwnd);
 
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
 
@@ -440,17 +506,17 @@ impl Window {
     /// 跑消息循环，直到窗口关闭。
     ///
     /// 返回后 `handler` 可以安全地继续使用 —— 本方法会先断开窗口对它的引用。
+    ///
+    /// **只应由主窗口调用**：一个线程只能有一个消息循环在跑。
+    /// 其余窗口用 [`Self::attach`] 登记处理器，绘制由这个循环统一分派。
     pub fn run(&self, handler: &mut dyn Handler) -> Result<()> {
-        let ptr: *mut dyn Handler = handler;
-        let _ = with_ctx(self.hwnd, |ctx| ctx.handler = Some(ptr));
+        self.attach(handler);
 
         // 进阻塞循环前先画一帧。否则第一帧要等某个消息到来才发生，
         // 表现为"窗口出现后内容空白一小会儿"。
-        if take_dirty(self.hwnd) {
-            with_handler(self.hwnd, |h| h.paint());
-        }
+        paint_dirty_windows();
 
-        let result = message_loop(self.hwnd);
+        let result = message_loop();
 
         // 窗口若还活着就断开指针，避免留下悬垂引用。
         // 窗口已销毁时 WindowCtx 已在 WM_NCDESTROY 里释放，不能再碰。
@@ -459,6 +525,39 @@ impl Window {
         }
         result
     }
+
+    /// 登记处理器但**不进消息循环**，用于第二个及以后的窗口。
+    ///
+    /// `handler` 必须比窗口活得久、且**地址稳定**（裸指针）。
+    /// 调用方应把它放进 `Box` 持有：`Box` 的堆地址不随容器扩容而变，
+    /// 而直接放进 `Vec<T>` 里，`Vec` 一扩容就会搬动元素、指针立刻失效。
+    ///
+    /// 登记后记得 `request_redraw()`（或让某个操作置脏），否则要等到
+    /// 下一条消息才会画第一帧。
+    pub fn attach(&self, handler: &mut dyn Handler) {
+        let ptr: *mut dyn Handler = handler;
+        let _ = with_ctx(self.hwnd, |ctx| ctx.handler = Some(ptr));
+    }
+
+    /// 标记为主窗口。只影响 `WM_DESTROY` 时是否结束消息循环。
+    ///
+    /// 返回是否**真的**标记上了。失败意味着窗口上下文还没就位，
+    /// 后果是关闭主窗口时不会 `PostQuitMessage` —— 窗口消失、进程不退。
+    /// 这是个静默且严重的失败，所以把结果交回调用方，让它至少能记一条日志。
+    pub fn mark_main(&self) -> bool {
+        // 闭包要显式以 `true` 结尾：赋值表达式的值是 `()`，
+        // 直接写 `ctx.is_main = true` 会让 `Option<()>` 去 `unwrap_or(false)`。
+        with_ctx(self.hwnd, |ctx| {
+            ctx.is_main = true;
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// 是否已被标记为主窗口。
+    pub fn is_main(&self) -> bool {
+        with_ctx(self.hwnd, |ctx| ctx.is_main).unwrap_or(false)
+    }
 }
 
 /// 消息循环。
@@ -466,7 +565,7 @@ impl Window {
 /// 关键设计：**先排空消息队列，再统一重绘一次**。
 /// 缩放窗口时系统会连发多条 `WM_SIZE`，逐条重绘会白白多画好几遍，
 /// 看起来就是拖边框时画面在抖。
-fn message_loop(hwnd: HWND) -> Result<()> {
+fn message_loop() -> Result<()> {
     let mut msg = MSG::default();
 
     loop {
@@ -493,9 +592,7 @@ fn message_loop(hwnd: HWND) -> Result<()> {
             dispatch(&msg);
         }
 
-        if take_dirty(hwnd) {
-            with_handler(hwnd, |h| h.paint());
-        }
+        paint_dirty_windows();
     }
 }
 
@@ -873,12 +970,22 @@ unsafe extern "system" fn wnd_proc(
             crate::platform::tray::remove(hwnd);
             with_handler(hwnd, |h| h.on_destroyed());
             emit(hwnd, Event::Destroyed);
-            unsafe { PostQuitMessage(0) };
+            // **只有主窗口销毁才结束消息循环。**
+            // 否则关掉任意一个弹出子窗口都会把整个程序带走 ——
+            // 多窗口之前这里是无条件 `PostQuitMessage`，那时只有一个窗口，
+            // 所以看不出问题。
+            let is_main = with_ctx(hwnd, |ctx| ctx.is_main).unwrap_or(false);
+            if is_main {
+                unsafe { PostQuitMessage(0) };
+            }
             return LRESULT(0);
         }
 
         // 窗口彻底销毁：释放上下文。
         WM_NCDESTROY => {
+            // 从"活着的窗口"表里摘掉。放在这里而不是 `WM_DESTROY`：
+            // `WM_DESTROY` 之后窗口还可能收到消息，绘制分派仍需要它。
+            unregister_window(hwnd);
             let ptr = ctx_ptr(hwnd);
             if !ptr.is_null() {
                 unsafe {

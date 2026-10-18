@@ -626,6 +626,12 @@ impl App {
             always_on_top,
         )?;
 
+        // 标记为主窗口：只有它销毁时程序才退出消息循环。
+        // 弹出子窗口销毁只关掉自己（见 window.rs 的 WM_DESTROY）。
+        if !window.mark_main() {
+            diag("⚠ 标记主窗口失败：关闭窗口将不会退出程序");
+        }
+
         let (client_w, client_h) = window.client_size();
         let dpi = window.dpi() as f32;
 
@@ -1019,6 +1025,19 @@ impl App {
             }
         }
         self.icon_requests.saturating_sub(before)
+    }
+
+    /// 自检用：主窗口是否被正确标记。
+    ///
+    /// 这个标志决定"关闭主窗口时程序是否退出"。它错了不会报任何错，
+    /// 表现是关了窗口进程还在 —— 所以值得单独验一下。
+    pub fn selftest_main_window_flag(&self) -> bool {
+        self.window.is_main()
+    }
+
+    /// 自检用：当前活着的窗口数。多窗口支持的地基是否接上。
+    pub fn selftest_live_window_count(&self) -> usize {
+        crate::platform::window::live_window_count()
     }
 
     /// 自检用：返回 `(失败待重试的图标数, 已放弃的图标数)`。
