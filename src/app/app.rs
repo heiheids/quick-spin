@@ -101,6 +101,12 @@ fn copy_shortcut_in(
     Ok(dest)
 }
 
+/// 拖入的条目最多等几轮扫描来归属（见 `App::pending_groups`）。
+///
+/// 取 3：扫描是异步的，一轮未必收录得进来；但等太多轮说明这个文件压根不会
+/// 出现（复制失败 / 被判坏条目），再等只是白占内存。
+const PENDING_TRIES: u8 = 3;
+
 /// 就地编辑的目标。
 enum EditTarget {
     /// 方格条目。存**覆盖表的键**（`.lnk` 完整路径）而不是下标：
@@ -496,6 +502,22 @@ pub struct App {
     /// 指针立刻失效 —— 那是未定义行为，而且不一定当场崩。
     popouts: std::collections::BTreeMap<String, Box<crate::popout::window::Popout>>,
 
+    /// 拖入后**待归属**的分组：`(覆盖键, 选项卡 key, 还能等几轮扫描)`。
+    ///
+    /// ## 为什么不在拖入时就写 `group`
+    ///
+    /// 扫描是异步的，而且很可能**在复制之前就有一次扫描在飞**。那次扫描完成时
+    /// 列表里还没有新文件，`prune_overrides` 会把刚写的 `group` 当孤儿删掉；
+    /// 之后条目被扫描收录时已经没有分组，于是回落到主窗口
+    ///（`Library::view` 里"没有显式分组的算主窗口"）。
+    ///
+    /// 表现就是使用者报的："不管在哪个页面拖进来，条目都丢进主窗口。"
+    ///
+    /// 改成**等扫描真的收录了它再写**，顺序就理顺了，不再依赖扫描的快慢。
+    /// 同一类坑在"添加系统程序"那条路径上已经踩过一次（见 `add_app` 的注释），
+    /// 那条是先检查目标存在堵住的，这条当时没堵。
+    pending_groups: Vec<(String, String, u8)>,
+
     /// 上次推给弹出子窗口时用的内容签名（见 `sync_popouts`）。
     popout_sync_sig: (usize, usize, f32),
 
@@ -800,6 +822,7 @@ impl App {
             exit_requested: false,
             popouts: std::collections::BTreeMap::new(),
             popout_sync_sig: (usize::MAX, usize::MAX, f32::MAX),
+            pending_groups: Vec::new(),
             menu: None,
             menu_hover: None,
             editing: None,
@@ -1109,6 +1132,9 @@ impl App {
 
         self.library = Library::new(report.items);
         self.assign_new_order(&before);
+        // **必须在 `prune_overrides` 之前**：待归属的分组要赶在清理之前落到
+        // 已收录的条目上，否则刚写上的分组会被这一轮的清理删掉。
+        self.apply_pending_groups();
         self.prune_overrides();
         self.normalize_groups();
         self.refresh_view();
@@ -1526,6 +1552,33 @@ impl App {
                 }
             }
         }
+    }
+
+    /// 把待归属的分组写到**扫描已经收录**的条目上。
+    ///
+    /// 每轮扫描调用一次。见 `pending_groups` 的字段说明。
+    fn apply_pending_groups(&mut self) {
+        if self.pending_groups.is_empty() {
+            return;
+        }
+        let live: std::collections::HashSet<String> = (0..self.library.total())
+            .filter_map(|i| self.library.get(i))
+            .map(crate::model::library::path_key)
+            .collect();
+
+        let mut rest = Vec::new();
+        for (key, group, tries) in std::mem::take(&mut self.pending_groups) {
+            if live.contains(&key) {
+                let mut ov = self.state.get().entry(&key);
+                ov.group = Some(group);
+                self.state.get_mut().set_entry(&key, ov);
+            } else if tries > 1 {
+                rest.push((key, group, tries - 1));
+            }
+            // 用完次数仍没出现：多半是复制失败、或被扫描判为坏条目。
+            // 丢掉它，不让这张表无限增长。
+        }
+        self.pending_groups = rest;
     }
 
     /// 打开 / 关闭某选项卡的弹出子窗口（侧栏右键菜单的入口）。    ///
@@ -2212,12 +2265,11 @@ impl App {
             }
             match copy_shortcut_in(src, &dir) {
                 Ok(dest) => {
-                    // 登记归到当前选项卡。不登记的话它会落在默认的主窗口里，
-                    // 用户拖到"程序"分组却发现条目出现在别处。
+                    // **不在这里写分组**，改成登记一条"待归属"，
+                    // 等扫描确认收录了这个文件再写（见 `pending_groups` 的说明）。
+                    // 当场写会被紧随其后的 `prune_overrides` 当孤儿清掉。
                     let key = dest.to_string_lossy().into_owned();
-                    let mut ov = self.state.get().entry(&key);
-                    ov.group = Some(group.clone());
-                    self.state.get_mut().set_entry(&key, ov);
+                    self.pending_groups.push((key, group.clone(), PENDING_TRIES));
                     added += 1;
                 }
                 Err(e) => eprintln!("复制快捷方式失败 [{}]: {e}", src.display()),
