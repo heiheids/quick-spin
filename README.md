@@ -1,5 +1,5 @@
 # Quick spin
-<img width="601" height="1181" alt="2026-10-18_112849" src="https://github.com/user-attachments/assets/fff654c6-f4ab-40db-b8e8-180d60b0a749" />
+
 <img width="623" height="1193" alt="2026-10-18_112911" src="https://github.com/user-attachments/assets/842a4ec5-0751-484e-9238-178e7e1af947" />
 <img width="595" height="1189" alt="2026-10-18_112827" src="https://github.com/user-attachments/assets/211cb692-21b9-4a86-bf54-52d8f0b7503c" />
 <img width="624" height="1215" alt="2026-10-18_112815" src="https://github.com/user-attachments/assets/d5ffda8e-9e71-48a5-bc76-02909ea4493d" />
