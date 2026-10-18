@@ -64,9 +64,10 @@ impl Popout {
         let (lw, lh) = logical_size(cw, ch, window.scale());
         let layout = PopoutLayout::compute(lw, lh, icon_size);
         // 图标管线自己一份（见 `icons.rs`）：加载线程要在这个窗口上唤醒重绘。
+        // 请求边长按 `icon_size` 算（与主窗口同一个来源），不是按算出来的方格边长。
         let icons = PopoutIcons::new(
             window.redraw_notifier(),
-            pixel_size(layout.tile, dpi as f32),
+            pixel_size(icon_size, dpi as f32),
         );
 
         Ok(Self {
@@ -121,12 +122,20 @@ impl Popout {
         self.sync_icon_size();
     }
 
-    /// 让图标管线的请求边长跟上当前的方格尺寸与窗口 DPI。
+    /// 让图标管线的请求边长跟上当前的图标尺寸与窗口 DPI。
     ///
-    /// 尺寸没变时它什么都不做（见 `PopoutIcons::set_pixel_size`），
-    /// 所以可以在拖动边框时每帧调用。
+    /// **取 `content.icon_size`（主窗口的图标尺寸）而不是 `layout.tile`。**
+    /// 两个理由，方向相反但结论一致：
+    ///
+    /// * 需求要的是"同一个 `icon_size` 来源"—— 主窗口就是按 `icon_size` 取图的，
+    ///   两边同一个来源才谈得上"图标一致"；
+    /// * `layout.tile` 会被内容区宽度夹紧，也就是说**拖动窗口宽度时它在连续变化**。
+    ///   拿它当键的输入，拖一次边框就会按每一帧的中间尺寸各请求一批图标，
+    ///   而那一批尺寸永远不会再被用到 —— 白跑 shell 提取，正是"拖动变卡"的经典成因。
+    ///
+    /// 尺寸没变时它什么都不做（见 `PopoutIcons::set_pixel_size`）。
     fn sync_icon_size(&mut self) {
-        let px = pixel_size(self.layout.tile, self.window.dpi() as f32);
+        let px = pixel_size(self.content.icon_size, self.window.dpi() as f32);
         self.icons.set_pixel_size(px);
     }
 
