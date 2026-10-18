@@ -404,14 +404,37 @@ pub struct Window {
     hwnd: HWND,
 }
 
+/// 这个窗口在**系统外壳**（任务栏、Alt+Tab）里以什么身份出现。
+///
+/// 使用者的要求原话："弹出的子窗口不要在任务栏留按钮，只有窗口一个就行了。"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellPresence {
+    /// 主窗口：要有任务栏按钮（`WS_EX_APPWINDOW`）。
+    Main,
+    /// 附属窗口（弹出子窗口）：**不要**任务栏按钮（`WS_EX_TOOLWINDOW`）。
+    Satellite,
+}
+
 // 窗口 API 里有几个方法（hide / is_visible / toggle_visible / set_topmost /
 // set_title / request_redraw）要等托盘、全局热键、异步图标加载接入后才有调用方。
 // 它们构成一套完整的窗口能力，先删掉再回加反而更容易出错。
 // 上述功能落地后请删掉下面这行，让死代码告警恢复。
+//
+// 注意：下面这个 `allow` 必须**紧贴** `impl Window` —— 在它前面插新类型时很容易
+// 把它"截胡"到自己头上（2026-10-18 插入 `ShellPresence` 时就这样多出过一次
+// `toggle_visible` / `set_geometry` 的未使用告警，看起来像"本来就有告警"）。
 #[allow(dead_code)]
 impl Window {
     /// 创建窗口。窗口尺寸即客户区尺寸（非客户区已被去掉）。
-    pub fn create(title: &str, geometry: Geometry, always_on_top: bool) -> Result<Self> {
+    ///
+    /// `presence` 决定它在任务栏/Alt+Tab 里出不出现 —— 原先这里是**无条件**
+    /// `WS_EX_APPWINDOW`，所以每个弹窗都会在任务栏多出一个按钮。
+    pub fn create(
+        title: &str,
+        geometry: Geometry,
+        always_on_top: bool,
+        presence: ShellPresence,
+    ) -> Result<Self> {
         let instance = HINSTANCE(unsafe { GetModuleHandleW(None) }.ctx("GetModuleHandleW")?.0);
 
         // WS_THICKFRAME 不是为了显示边框（WM_NCCALCSIZE 已经把它去掉），
@@ -419,7 +442,18 @@ impl Window {
         // WS_EX_NOREDIRECTIONBITMAP 是"无闪烁"的地基：没有重定向位图，
         // GDI 就没有可擦可画的表面，从根上消除了擦背景导致的闪烁。
         let style = WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
-        let mut ex_style = WS_EX_NOREDIRECTIONBITMAP | WS_EX_APPWINDOW;
+        let mut ex_style = WS_EX_NOREDIRECTIONBITMAP;
+        // 任务栏身份。两个标志是**互斥**的：APPWINDOW 会强制出现，
+        // TOOLWINDOW 会排除它；同时带上哪个赢是不确定的，所以只设一个。
+        //
+        // 不用"给弹窗设 owner"这种更常见的做法（有 owner 的窗口同样不上任务栏），
+        // 因为 **Windows 会在 owner 最小化时把附属窗口一起隐藏** —— 那会直接破掉
+        // "钉住的弹窗在主窗口最小化/收进托盘时留下"这条已经定好的语义。
+        // `WS_EX_TOOLWINDOW` 没有这个副作用：窗口仍然是独立的。
+        match presence {
+            ShellPresence::Main => ex_style |= WS_EX_APPWINDOW,
+            ShellPresence::Satellite => ex_style |= WS_EX_TOOLWINDOW,
+        }
         if always_on_top {
             ex_style |= WS_EX_TOPMOST;
         }

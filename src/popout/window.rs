@@ -11,7 +11,7 @@ use crate::config::theme::Scheme;
 use crate::error::Result;
 use crate::platform::acrylic;
 use crate::platform::hittest::HitTest;
-use crate::platform::window::{CloseAction, Event, Geometry, Handler, Rect, Window};
+use crate::platform::window::{CloseAction, Event, Geometry, Handler, Rect, ShellPresence, Window};
 use crate::popout::dock::{self, DockRequest};
 use crate::popout::icons::{Content, PopoutIcons, pixel_size};
 use crate::popout::layout::{PopoutLayout, TitleButton};
@@ -184,7 +184,11 @@ impl Popout {
             dock_side,
             pinned,
         } = dock;
-        let window = Window::create(title, geometry, false)?;
+        // 附属窗口身份：**不在任务栏留按钮**（使用者的要求："弹出的子窗口不要在
+        // 任务栏留按钮，只有窗口一个就行了"）。用 `WS_EX_TOOLWINDOW` 而不是给
+        // 它设 owner —— owner 会让 Windows 在主窗口最小化时把弹窗一起隐藏，
+        // 那会破掉"钉住的弹窗要留下"这条语义（见 `ShellPresence` 的说明）。
+        let window = Window::create(title, geometry, false, ShellPresence::Satellite)?;
         // 系统侧圆角必须显式设一次：Win11 对顶层窗口默认就给圆角，
         // 不设就会拿到系统默认值 —— 使用者报的"弹出小窗底部是圆角"就是这个来源
         //（主窗口一直在 `acrylic::apply` 里设，弹窗从来没设过）。

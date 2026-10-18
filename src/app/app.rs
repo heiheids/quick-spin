@@ -18,7 +18,7 @@ use crate::paths;
 use crate::platform::acrylic;
 use crate::platform::hittest::{HitTest, RectI};
 use crate::platform::icon_loader::Loader;
-use crate::platform::window::{CloseAction, Event, Geometry, Handler, Window};
+use crate::platform::window::{CloseAction, Event, Geometry, Handler, ShellPresence, Window};
 use crate::popout::icons::{Content, IconSource, Item};
 use crate::render::composer::Composer;
 use crate::render::icon_cache::{DEFAULT_BUDGET as ICON_BUDGET, IconCache};
@@ -633,6 +633,8 @@ impl App {
                 y: saved.window.y,
             },
             always_on_top,
+            // 主窗口：任务栏里**只有它**一个按钮（弹窗是附属身份，见 ShellPresence）。
+            ShellPresence::Main,
         )?;
 
         // 标记为主窗口：只有它销毁时程序才退出消息循环。
