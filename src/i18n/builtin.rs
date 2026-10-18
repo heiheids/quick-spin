@@ -53,6 +53,9 @@ pub const ZH_CN: Dict = &[
     ("settings.sources", "来源"),
     ("settings.about", "关于"),
     ("settings.theme_custom", "主题色彩自定义"),
+    // 弹出子窗口
+    ("popout.palette", "配色"),
+    ("popout.follow_main", "跟随主窗口"),
     ("settings.help", "使用说明"),
     ("settings.exit_program", "退出程序"),
     ("settings.about_update", "关于更新"),
@@ -135,6 +138,12 @@ pub const EN_US: Dict = &[
     ("settings.help", "User guide"),
     ("settings.exit_program", "Exit"),
     ("settings.about_update", "Updates"),
+    // 这一条原先只写在中文词典里，英文界面会直接显示键名
+    //（`settings.theme_custom`）。补上。
+    ("settings.theme_custom", "Theme colors"),
+    // 弹出子窗口
+    ("popout.palette", "Colors"),
+    ("popout.follow_main", "Follow main window"),
     ("settings.scheme", "Color scheme"),
     ("settings.opacity", "Panel opacity"),
     ("settings.backdrop", "Backdrop material"),

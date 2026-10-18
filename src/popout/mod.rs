@@ -12,6 +12,7 @@
 //! | `state.rs` | 持久化模型：开关 / 位置 / 尺寸 / 吸附 / 钉住 / 名字 / 独立配色 |
 //! | `dock.rs` | 吸附跟随的几何（纯算术，创建与跟随共用同一个函数） |
 //! | `layout.rs` | 这个窗口自己的布局（**不复用**主窗口的 `ui::layout`） |
+//! | `palette.rs` | 选色浮层的几何与命中判定 + "用哪套配色"的唯一规则 |
 //! | `painter.rs` | 绘制：标题栏（4 个按钮）+ 图标网格 |
 //! | `icons.rs` | 内容快照 + 这个窗口自己的图标管线（加载线程与位图缓存） |
 //! | `launch.rs` | 点一格 = 启动它（复用 `shell::launch`，不另写启动路径） |
@@ -40,6 +41,7 @@ pub mod icons;
 pub mod launch;
 pub mod layout;
 pub mod painter;
+pub mod palette;
 pub mod report;
 pub mod state;
 pub mod window;

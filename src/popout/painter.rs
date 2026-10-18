@@ -21,6 +21,7 @@ use windows::Win32::Graphics::Direct2D::*;
 use crate::config::theme::Scheme;
 use crate::error::{Result, Win32Ext};
 use crate::popout::icons::Item;
+use crate::popout::palette::PaletteView;
 use crate::render::{Role, TextEngine};
 
 use crate::render::painters::{rounded_i, to_d2d};
@@ -394,6 +395,131 @@ impl PopoutPainter {
         )?;
         Ok(())
     }
+
+    /// 画选色浮层。
+    ///
+    /// 它是**最上层**：先铺一层压暗（把下面的网格压下去，读起来是"这是个浮层"），
+    /// 再画面板、标题、以及"跟随主窗口"那一行和色块网格。
+    ///
+    /// 几何全部来自 [`PaletteView::layout`]（`palette.rs` 的纯函数），
+    /// 绘制**不做任何几何决策** —— 错了应该在那个模块的自检里暴露，
+    /// 而不是在这里靠肉眼对齐。
+    pub fn draw_palette(
+        &self,
+        ctx: &ID2D1DeviceContext,
+        text: &mut TextEngine,
+        view: &PaletteView,
+    ) -> Result<()> {
+        let Some(brush) = &self.brush else {
+            return Ok(());
+        };
+        let scheme = view.scheme;
+        let pl = view.layout;
+
+        // SAFETY: COM 调用；所有结构体都是本函数栈上的局部量。
+        unsafe {
+            // ---- 压暗整窗：点它外面就是关闭，所以要让"外面"看起来是背景 ----
+            brush.SetColor(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.45,
+            });
+            // 铺满整个客户区：用面板矩形外扩一大圈代替"查询窗口尺寸"，
+            // 少一次 syscall，效果一样（多出来的部分画在窗口外，会被裁掉）。
+            ctx.FillRectangle(
+                &rect_to_d2d(RectI::new(
+                    pl.panel.x - 4000,
+                    pl.panel.y - 4000,
+                    pl.panel.w + 8000,
+                    pl.panel.h + 8000,
+                )),
+                brush,
+            );
+
+            // ---- 浮层面板 ----
+            brush.SetColor(&to_d2d(scheme.panel.from));
+            ctx.FillRoundedRectangle(&rounded_i(pl.panel, 8.0), brush);
+            brush.SetColor(&to_d2d(scheme.border.from));
+            ctx.DrawRoundedRectangle(&rounded_i(pl.panel, 8.0), brush, 1.2, None);
+
+            // ---- "跟随主窗口"那一行 ----
+            //
+            // 底色用**主窗口的面板色**，所以它看起来就是"主窗口现在长这样"，
+            // 不需要靠文字去解释。悬停时压一层高亮。
+            brush.SetColor(&to_d2d(view.main_scheme.panel.from));
+            ctx.FillRoundedRectangle(&rounded_i(pl.follow, 5.0), brush);
+            brush.SetColor(&to_d2d(if view.hover_follow {
+                scheme.tile_hover
+            } else {
+                scheme.border.from
+            }));
+            ctx.DrawRoundedRectangle(&rounded_i(pl.follow, 5.0), brush, 1.2, None);
+
+            // ---- 色块网格 ----
+            //
+            // 颜色列表**在这里取一次**，不要在循环里取：那会变成每帧 64 次
+            // 分配（`palette_colors()` 每次都建一个新 `Vec`）。
+            let colors = crate::config::theme::palette_colors();
+            for (i, r) in pl.swatches.iter().enumerate() {
+                let Some(c) = colors.get(i).copied() else {
+                    break;
+                };
+                brush.SetColor(&to_d2d(c.with_alpha(255)));
+                ctx.FillRoundedRectangle(&rounded_i(*r, 4.0), brush);
+
+                // 悬停：一圈亮边框。选中：一圈更粗的强调色边框 + 内圈对比描边。
+                //
+                // 内圈那条是必要的：色块本身可能就是强调色的近似色，
+                // 只描外圈的话在浅色格子上几乎看不出来。
+                if view.selected == Some(i) {
+                    brush.SetColor(&to_d2d(scheme.accent));
+                    ctx.DrawRoundedRectangle(&rounded_i(*r, 4.0), brush, 2.4, None);
+                    ctx.DrawRoundedRectangle(&rounded_i(inset(*r, 3), 3.0), brush, 1.0, None);
+                } else if view.hover_swatch == Some(i) {
+                    brush.SetColor(&to_d2d(scheme.text_primary));
+                    ctx.DrawRoundedRectangle(&rounded_i(*r, 4.0), brush, 1.6, None);
+                }
+            }
+        }
+
+        // ---- 文字（两处，走文本引擎）----
+        //
+        // 色块上不写字：颜色本身是内容。只有标题与"跟随主窗口"需要文字说明。
+        text.draw(
+            ctx,
+            &view.labels.title,
+            Role::Tab,
+            pl.title.as_f32(),
+            scheme.text_primary,
+        )?;
+        // 那一行的文字画在它的左内边距处，垂直居中。
+        text.draw(
+            ctx,
+            &view.labels.follow_main,
+            Role::Caption,
+            (
+                (pl.follow.x + 8) as f32,
+                pl.follow.y as f32,
+                (pl.follow.w - 16).max(1) as f32,
+                pl.follow.h as f32,
+            ),
+            // 底色是**主窗口的面板色**，所以文字颜色也要取主窗口的 ——
+            // 这个窗口自己的文字色在主窗口的底色上可能看不清。
+            view.main_scheme.text_primary,
+        )?;
+        Ok(())
+    }
+}
+
+/// 把一个矩形四边各内缩 `d`（结果为负宽高时夹到 0，不 panic）。
+fn inset(r: RectI, d: i32) -> RectI {
+    RectI::new(
+        r.x + d,
+        r.y + d,
+        (r.w - 2 * d).max(0),
+        (r.h - 2 * d).max(0),
+    )
 }
 
 fn point(p: (f32, f32)) -> windows_numerics::Vector2 {

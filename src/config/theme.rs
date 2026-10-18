@@ -45,7 +45,14 @@ impl Default for Backdrop {
 }
 
 /// 一整套配色方案。字段名与设计稿元素一一对应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` 是给"主窗口换色了没有"用的（弹出子窗口靠它决定要不要跟着换）。
+/// **刻意不用 `name` 去比**：名字是给人看的，历史上正因为"靠名字判断有没有变"
+/// 而出过 bug（名字固定 → 笔刷不重建 → 只有一部分界面跟着变色，见 `from_base`
+/// 的注释）。要判"变没变"就得比真正参与绘制的那些字段。
+///
+/// 只有 `PartialEq` 没有 `Eq`：里面有权重是 `f32` 的字段。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Scheme {
     /// 方案显示名，用于设置界面（例如"深蓝金"）。
@@ -556,6 +563,49 @@ pub const BASE_PALETTE: &[&str] = &[
 
 /// 色块网格每行几个。改它要同步 `layout.rs` 里的同名常量。
 pub const BASE_PALETTE_COLS: usize = 8;
+
+/// 色板候选色（解析好的）。
+///
+/// **这是"可选基础色"的唯一出处**：主窗口设置面板与弹出子窗口的选色浮层都
+/// 调它。之前主窗口自己在绘制处 `filter_map(from_hex)` 解析了一遍，而弹窗也
+/// 需要同一份颜色 —— 两处各解析一次正是本工程反复吃亏的模式
+///（见 `docs/ARCHITECTURE.md` §17.9 的清单）。
+///
+/// 解析不了的项**跳过而不是补默认色**：补了会让格子数与布局错位，
+/// 表现是"点 A 却选中了 B"。
+pub fn palette_colors() -> Vec<Color> {
+    BASE_PALETTE.iter().filter_map(|h| Color::from_hex(h)).collect()
+}
+
+/// 基础色对应色板里的第几格。`None` = 不是色板里的颜色（含"跟随主窗口"的空串）。
+///
+/// **只有正好相等才算选中。** 手改配置填了个自定义色时，没有任何格子该高亮 ——
+/// 硬找最近似的会误导使用者以为他选的是那一格。
+///
+/// 主窗口设置面板与弹出子窗口的选色浮层共用它：两处各写一份的话，
+/// 会出现"同一个颜色在一个窗口里高亮、在另一个里不高亮"。
+pub fn palette_index(base_color: &str) -> Option<usize> {
+    let c = Color::from_hex(base_color.trim())?;
+    palette_colors()
+        .iter()
+        .position(|s| (s.r(), s.g(), s.b()) == (c.r(), c.g(), c.b()))
+}
+
+/// 与 [`palette_colors`] **同一下标**的十六进制文本。
+///
+/// 选色时要把"选中的那一格"变成配置里的基础色文本，而格子是按
+/// `palette_colors()` 摆的 —— 直接拿下标去索引 `BASE_PALETTE` 会**错位**：
+/// 万一将来某个十六进制串解析失败，那个函数会跳过它，而下标还是原来那套。
+/// 这里走同一条过滤，所以下标一定对得上。
+///
+/// 不分配内存（`nth` 是在原表上走），可以在点击路径上放心调。
+pub fn palette_hex(index: usize) -> Option<&'static str> {
+    BASE_PALETTE
+        .iter()
+        .filter(|h| Color::from_hex(h).is_some())
+        .nth(index)
+        .copied()
+}
 
 fn builtin_schemes() -> BTreeMap<String, Scheme> {
     let mut map = BTreeMap::new();

@@ -729,8 +729,244 @@ fn selftest() -> ExitCode {
         );
     }
 
-    // 主窗口标志：决定关闭主窗口时程序退不退出。
-    // 错了不会报错，只是关了窗口进程还在 —— 必须单独验。
+    // 色板与"用哪套配色"。**纯数据**，没有窗口也能全测 —— 而这几条判据
+    // 出错的表现都在另一个窗口里（"点了色没反应"、"选了色重启就没了"），
+    // 靠人眼撞是碰运气。
+    {
+        use config::theme::{BASE_PALETTE, palette_colors, palette_index};
+        use popout::palette::{PaletteLayout, follows_main, resolve_scheme};
+        use platform::hittest::RectI;
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // ---- 色板：唯一出处，且每一项都解析得出来 ----
+        //
+        // 少解析出一项就会让"格子数与颜色列表错位"，表现是点 A 选中 B ——
+        // 而 `filter_map` 会**静默**跳过坏项，所以必须在这里钉住数量。
+        let colors = palette_colors();
+        if colors.len() != BASE_PALETTE.len() {
+            failures.push(format!(
+                "色板有 {} 项却没解析出同样多的颜色（{} 项）—— 有项解析失败了",
+                BASE_PALETTE.len(),
+                colors.len()
+            ));
+        }
+        // 每一项都能被 `palette_index` 找回自己（往返一致）
+        for (i, hex) in BASE_PALETTE.iter().enumerate() {
+            if palette_index(hex) != Some(i) {
+                failures.push(format!("色板第 {i} 项 {hex} 找不到自己"));
+            }
+        }
+        // 空串与不在色板里的颜色都没有对应格子：不该"硬找最近似的"高亮一格
+        if palette_index("").is_some() {
+            failures.push("空的基础色不该高亮任何色块".to_string());
+        }
+        if palette_index("#010203").is_some() {
+            failures.push("不在色板里的自定义色不该高亮任何色块".to_string());
+        }
+        // 带空白的写法要能容忍（状态文件是手改得到的）
+        if palette_index("  #0A1A2F  ") != Some(0) {
+            failures.push("带空白的基础色应当照常识别".to_string());
+        }
+
+        // ---- "用哪套配色"的规则 ----
+        let main = config::Scheme::from_base(config::Color::from_hex("#159AA4").unwrap());
+        if resolve_scheme("", &main) != main {
+            failures.push("空串应当**跟随主窗口**，实为另一套".to_string());
+        }
+        if !follows_main("") || !follows_main("   ") || follows_main("#0A1A2F") {
+            failures.push("follows_main 判据不对".to_string());
+        }
+        let own = resolve_scheme("#0A1A2F", &main);
+        if own == main {
+            failures.push("自己设了颜色却仍旧用主窗口那套".to_string());
+        }
+        // 派生是确定性的：同一个基础色两次必须完全一致（否则每次重算都"变了"，
+        // 会变成每帧请求重绘）
+        if config::Scheme::from_base(config::Color::from_hex("#0A1A2F").unwrap())
+            != config::Scheme::from_base(config::Color::from_hex("#0A1A2F").unwrap())
+        {
+            failures.push("同一个基础色派生出的两套配色不相等".to_string());
+        }
+        // 坏值回落到主窗口那套，而不是没有配色
+        if resolve_scheme("不是颜色", &main) != main {
+            failures.push("非法基础色应当回落到主窗口配色".to_string());
+        }
+
+        // ---- 选色浮层的几何与命中 ----
+        let area = RectI::new(10, 48, 300, 372);
+        let pl = PaletteLayout::compute(area);
+        if pl.swatches.len() != colors.len() {
+            failures.push(format!(
+                "色块数 {} 与颜色数 {} 不一致（绘制与命中的下标会错位）",
+                pl.swatches.len(),
+                colors.len()
+            ));
+        }
+        // 默认尺寸下浮层要完整落在内容区里，且不压标题栏
+        if pl.panel.x < area.x
+            || pl.panel.y < area.y
+            || pl.panel.x + pl.panel.w > area.x + area.w
+            || pl.panel.y + pl.panel.h > area.y + area.h
+        {
+            failures.push(format!(
+                "默认尺寸下浮层越界: 面板 {:?} 内容区 {:?}",
+                pl.panel, area
+            ));
+        }
+        // 每个色块都要落在面板里，且点到它的中心能命中它自己
+        for (i, r) in pl.swatches.iter().enumerate() {
+            if !pl.panel.contains(r.x, r.y) || !pl.panel.contains(r.x + r.w - 1, r.y + r.h - 1) {
+                failures.push(format!("第 {i} 个色块画到面板外面了"));
+                break;
+            }
+            if pl.swatch_at(r.x + r.w / 2, r.y + r.h / 2) != Some(i) {
+                failures.push(format!("点第 {i} 个色块的中心没命中它自己"));
+                break;
+            }
+        }
+        // "跟随主窗口"那一行：能命中，且不与任何色块重叠
+        if !pl.is_follow(pl.follow.x + pl.follow.w / 2, pl.follow.y + pl.follow.h / 2) {
+            failures.push("点\"跟随主窗口\"那一行没命中".to_string());
+        }
+        for r in pl.swatches.iter() {
+            if r.intersects(&pl.follow) {
+                failures.push("有颜色格子与\"跟随主窗口\"那一行重叠".to_string());
+                break;
+            }
+        }
+        // 点浮层外面 = 关闭：内容区左上角在浮层之外（浮层是居中的）
+        if pl.contains(area.x, area.y) {
+            failures.push("浮层不该盖住内容区左上角（那里应当是\"点外面关闭\"）".to_string());
+        }
+        // 极窄/极矮的窗口：不许 panic，色块数也不能少（宁可由绘制层裁掉）
+        for (w, h) in [(60, 60), (120, 90), (1, 1), (4000, 4000)] {
+            let tiny = PaletteLayout::compute(RectI::new(0, 0, w, h));
+            if tiny.swatches.len() != colors.len() {
+                failures.push(format!("窗口 {w}×{h} 时色块数变了（{} 个）", tiny.swatches.len()));
+            }
+            if tiny.swatches.iter().any(|r| r.w <= 0 || r.h <= 0) {
+                failures.push(format!("窗口 {w}×{h} 时出现了零尺寸色块"));
+            }
+        }
+
+        println!(
+            "弹窗配色   : {}",
+            if failures.is_empty() {
+                "色板单一出处 / 往返可回查 / 自定义色不高亮 / 跟随主窗口 / 派生确定 / 非法值回落 / 浮层不越界 / 命中一一对应 / 极窄窗口不 panic —— 全部通过（逐项比对期望值）".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // **配色能不能穿过 `persist_popout` 的合并** —— 使用者点名要钉住的那条。
+    //
+    // 出错的表现是"选了色、当时生效、重启就没了"：合并时用了记录里的旧值，
+    // 把窗口刚选的颜色盖掉。这条只有真的重启一次才会暴露，所以必须离线钉死。
+    {
+        use popout::state::PopoutWindow;
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // 记录里有旧配色 + 用户起的名字
+        let old = PopoutWindow {
+            name: Some("用户起的名字".to_string()),
+            base_color: "#111111".to_string(),
+            width: 300,
+            ..Default::default()
+        };
+        // 窗口此刻：选了新配色（名字它是拿不到的，只能是 None）
+        let fresh = PopoutWindow {
+            name: None,
+            base_color: "#3A8FE0".to_string(),
+            width: 420,
+            ..Default::default()
+        };
+        let merged = PopoutWindow::merge_persisted(fresh, &old);
+
+        if merged.base_color != "#3A8FE0" {
+            failures.push(format!(
+                "配色没穿过合并：期望 #3A8FE0，实为 {}（选了色会被静默丢弃）",
+                merged.base_color
+            ));
+        }
+        if merged.name != Some("用户起的名字".to_string()) {
+            failures.push("名字被窗口那份默认值覆盖了".to_string());
+        }
+        if merged.width != 420 {
+            failures.push("尺寸没取窗口那边的值".to_string());
+        }
+
+        // 反方向同样重要：用户选了"跟随主窗口"（空串），不能被旧配色盖回去
+        let fresh_follow = PopoutWindow {
+            base_color: String::new(),
+            ..Default::default()
+        };
+        let merged_follow = PopoutWindow::merge_persisted(fresh_follow, &old);
+        if !merged_follow.base_color.is_empty() {
+            failures.push(format!(
+                "选\"跟随主窗口\"被旧配色覆盖了：实为 {}",
+                merged_follow.base_color
+            ));
+        }
+
+        // 没变化时必须**相等**：否则每次落盘都会写一次（写盘风暴）
+        let same = PopoutWindow::merge_persisted(old.clone(), &old);
+        if same != old {
+            failures.push("窗口状态没变时合并结果却与记录不同（会每次落盘）".to_string());
+        }
+
+        println!(
+            "弹窗配色落盘: {}",
+            if failures.is_empty() {
+                "配色穿过合并 / 跟随主窗口也能穿过 / 名字用记录值 / 无变化不写盘 —— 全部通过（逐项比对期望值）".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // 启动恢复：只有 `open` 的那些要被开出来，且顺序稳定。
+    {
+        use popout::state::{PopoutState, PopoutWindow};
+
+        let mut st = PopoutState::default();
+        st.set(
+            "tab3",
+            PopoutWindow {
+                open: true,
+                ..Default::default()
+            },
+        );
+        st.set(
+            "main",
+            PopoutWindow {
+                open: false,
+                ..Default::default()
+            },
+        );
+        st.set(
+            "tab2",
+            PopoutWindow {
+                open: true,
+                ..Default::default()
+            },
+        );
+
+        let open: Vec<&str> = st.to_open().into_iter().map(|(k, _)| k).collect();
+        let want = vec!["tab2", "tab3"];
+        println!(
+            "启动恢复   : {}",
+            if open == want {
+                "只恢复 open 的窗口 / 按选项卡 key 排序稳定（tab2, tab3）—— 通过".to_string()
+            } else {
+                format!("⚠ 期望 {want:?}，实为 {open:?}")
+            }
+        );
+    }
+
+    // 主窗口标志：决定关闭主窗口时程序退不退出。    // 错了不会报错，只是关了窗口进程还在 —— 必须单独验。
     println!(
         "多窗口基础 : 主窗口标志 {}；活着的窗口 {} 个",
         if app.selftest_main_window_flag() { "已置位" } else { "⚠ 未置位（关窗口将不退出）" },

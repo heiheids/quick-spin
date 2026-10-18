@@ -56,6 +56,12 @@ struct Strings {
     /// 底部按钮：退出程序 / 关于更新
     settings_exit_program: String,
     settings_about_update: String,
+    /// 弹出子窗口选色浮层的标题，以及"跟随主窗口"那一行的文字。
+    ///
+    /// 窗口层不该知道语言文件的形状，所以由装配层取好、随创建参数递进去
+    ///（与 `diag`、`report` 同一条依赖方向的理由）。
+    popout_palette: String,
+    popout_follow_main: String,
 }
 
 /// 只扫程序自己的快捷方式目录。
@@ -384,6 +390,8 @@ impl Strings {
             settings_help: i18n.t("settings.help").to_string(),
             settings_exit_program: i18n.t("settings.exit_program").to_string(),
             settings_about_update: i18n.t("settings.about_update").to_string(),
+            popout_palette: i18n.t("popout.palette").to_string(),
+            popout_follow_main: i18n.t("popout.follow_main").to_string(),
         }
     }
 }
@@ -815,6 +823,14 @@ impl App {
         // 复制一份句柄再调用：`self.window.run(&mut self)` 会同时借用
         // `self` 的字段与整体，借用检查器不接受。`Window` 是 Copy 的。
         let window = self.window;
+        // **先恢复弹出子窗口（不显示），再决定显隐。**
+        //
+        // 顺序有意义：窗口先按记录建出来，"要不要看得见"这一步交给下面
+        // `set_main_visible` 那条**唯一**的显隐链去决定 —— 于是
+        // "启动时隐藏到托盘"这种情况不需要在这里再判一次（漏判的表现是
+        // 弹窗在托盘模式下自己冒出来）。放在消息循环之前也是对的：
+        // 循环还没开始，窗口只是存在而已。
+        self.restore_popouts();
         self.set_main_visible(true);
         let result = window.run(&mut self);
         self.save_state();
@@ -1582,11 +1598,12 @@ impl App {
         }
         let fresh = p.persistable();
         let old = self.state.get().popout.get(key);
-        let merged = crate::popout::state::PopoutWindow {
-            name: old.name.clone(),
-            base_color: old.base_color.clone(),
-            ..fresh
-        };
+        // 合并规则本身在 `state::PopoutWindow::merge_persisted`（纯函数，
+        // 能被自检钉住）：**只有 `name` 用记录里的值**，`base_color` 用窗口的。
+        // 早先这里也保留记录里的 `base_color`，理由是"窗口那份是默认值"——
+        // 那个理由在窗口开始持有它之后就不成立了，而保留会让用户选的颜色
+        // 被静默丢弃：当时生效、重启就没了。
+        let merged = crate::popout::state::PopoutWindow::merge_persisted(fresh, &old);
         if merged == old {
             return false;
         }
@@ -1803,7 +1820,20 @@ impl App {
             return true;
         }
 
-        // 没开 → 按记录的状态开一个
+        // 没开 → 开一个，并立刻显示（用户是点了菜单要看到它的）。
+        self.open_popout(tab_key, true)
+    }
+
+    /// 开一个弹出子窗口（按记录里的位置 / 尺寸 / 吸附状态摆好）。
+    ///
+    /// 抽成函数是给**启动恢复**复用的：恢复必须走**同一条**创建路径。
+    /// 再写一份"创建 + 摆位 + 装箱 + attach + show"迟早会漏掉其中一步 ——
+    /// 漏 `show()` 那次的症状是"点了菜单什么都没出现"，而且不报错。
+    ///
+    /// `show` 只决定**创建后是否立刻显示**：启动恢复先按流程把窗口建出来，
+    /// 显隐交给 `set_main_visible` 那一条链统一决定（见 [`App::run`]），
+    /// 这样"启动时隐藏到托盘"这种状态不需要在这里再判一次。
+    fn open_popout(&mut self, tab_key: &str, show: bool) -> bool {
         let saved = self.state.get().popout.get(tab_key);
         let tab_label = self
             .tabs
@@ -1847,6 +1877,13 @@ impl App {
             &title,
             geometry,
             self.scheme.clone(),
+            // 自己那份配色（空串 = 跟随主窗口）与浮层文字都从装配层递进去：
+            // 窗口层不读 `state`，也不读语言文件。
+            saved.base_color.clone(),
+            crate::popout::palette::PaletteText {
+                title: self.strings.popout_palette.clone(),
+                follow_main: self.strings.popout_follow_main.clone(),
+            },
             self.layout.icon_size as i32,
             saved.docked,
             saved.dock_side,
@@ -1864,11 +1901,13 @@ impl App {
                 // 要求的"地址稳定"。
                 let mut boxed = Box::new(p);
                 boxed.attach();
-                // 显示出来。`Window::create` 只创建、不显示
-                //（`WS_POPUP` 不含 `WS_VISIBLE`），主窗口也是在创建后自己
-                // 调 `show()`（见 `App::new` 里的 `window.show()`）。
-                // 漏掉这一步的表现是"点了菜单什么都没出现"，不报错。
-                boxed.show();
+                if show {
+                    // 显示出来。`Window::create` 只创建、不显示
+                    //（`WS_POPUP` 不含 `WS_VISIBLE`），主窗口也是在创建后自己
+                    // 调 `show()`（见 `App::new` 里的 `window.show()`）。
+                    // 漏掉这一步的表现是"点了菜单什么都没出现"，不报错。
+                    boxed.show();
+                }
                 self.popouts.insert(tab_key.to_string(), boxed);
                 // **把同步签名打回哨兵值，强制下一次绘制推一次内容。**
                 //
@@ -1892,6 +1931,54 @@ impl App {
                 // 这条路径没有可视化提示，所以至少留下日志。
                 diag(&format!("弹出子窗口创建失败: {tab_key} — {e}"));
                 true
+            }
+        }
+    }
+
+    /// 按记录恢复上次开着的弹出子窗口。
+    ///
+    /// 在 `App::run` 里、**第一次 `set_main_visible` 之前**调用：
+    /// 窗口先建出来（不显示），显隐随后由那一条链统一决定 ——
+    /// 所以"启动时隐藏到托盘"时它们不会自己冒出来，而主窗口一显示它们
+    /// 就跟着出现（钉住的按 `sync_visibility` 的规则也在这时出来）。
+    ///
+    /// 一个建不出来**不影响**其余：`open_popout` 内部把错误记进日志后返回，
+    /// 循环继续。
+    fn restore_popouts(&mut self) {
+        // 先取成 `Vec<String>`：下面 `open_popout` 要可变借用 `self`，
+        // 不能同时借着 `self.state`。
+        let keys: Vec<String> = self
+            .state
+            .get()
+            .popout
+            .to_open()
+            .into_iter()
+            .map(|(k, _)| k.to_string())
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let mut opened = 0usize;
+        for key in keys {
+            if self.open_popout(&key, false) {
+                opened += 1;
+            }
+        }
+        diag(&format!("已恢复 {opened} 个弹出子窗口"));
+    }
+
+    /// 主窗口换了配色 → 让"跟随主窗口"的弹窗跟上。
+    ///
+    /// **只动跟随的那些**：有自己配色的窗口不受主窗口影响，这正是
+    /// "弹窗独立配色不影响主窗口"的反方向保证。
+    fn refresh_popout_schemes(&mut self) {
+        if self.popouts.is_empty() {
+            return;
+        }
+        let scheme = self.scheme.clone();
+        for p in self.popouts.values_mut() {
+            if p.set_main_scheme(scheme.clone()) {
+                p.request_redraw();
             }
         }
     }
@@ -2820,26 +2907,16 @@ impl App {
                 ];
 
                 self.settings.ensure(self.renderer.context())?;
-                // 色板：把常量里的十六进制文本解析成颜色。
-                // 解析不了的项**跳过而不是补默认色** —— 补了会让格子数和
-                // `layout.settings_swatches` 错位，点 A 却选中了 B。
-                let swatches: Vec<config::Color> =
-                    crate::config::theme::BASE_PALETTE
-                        .iter()
-                        .filter_map(|h| config::Color::from_hex(h))
-                        .collect();
+                // 色板：候选色只有一处（`theme::palette_colors`），
+                // 弹出子窗口的选色浮层调的是同一个函数。
+                // 解析不了的项在那边已经跳过而不是补默认色 ——
+                // 补了会让格子数和 `layout.settings_swatches` 错位，点 A 却选中了 B。
+                let swatches: Vec<config::Color> = crate::config::theme::palette_colors();
                 // 只有当基础色**正好等于**某个色板项时才算"选中"。
-                // 手改配置填了个自定义色时，没有任何格子该高亮 —— 硬找最近似的
-                // 会误导用户以为他选的是那一格。
-                let current_swatch = if self.cfg.appearance.base_color.trim().is_empty() {
-                    None
-                } else {
-                    config::Color::from_hex(&self.cfg.appearance.base_color).and_then(|c| {
-                        swatches.iter().position(|s| {
-                            (s.r(), s.g(), s.b()) == (c.r(), c.g(), c.b())
-                        })
-                    })
-                };
+                // 判据同样只有一处（`theme::palette_index`），
+                // 弹窗的选色浮层用的是它 —— 否则会出现"同一个颜色在一个窗口里
+                // 高亮、在另一个里不高亮"。
+                let current_swatch = crate::config::theme::palette_index(&self.cfg.appearance.base_color);
                 self.settings.draw(
                     self.renderer.context(),
                     &mut self.text,
@@ -2986,6 +3063,9 @@ impl App {
         // 否则 DWM 那边的着色还是上一套的。
         self.apply_backdrop();
         self.rebuild_layout();
+        // 换了主窗口配色 → "跟随主窗口"的弹窗要跟着变。
+        // 有自己配色的弹窗完全不受影响（`set_main_scheme` 里判）。
+        self.refresh_popout_schemes();
     }
 
     fn apply_backdrop(&mut self) {

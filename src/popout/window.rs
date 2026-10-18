@@ -14,6 +14,7 @@ use crate::popout::dock::{self, DockRequest};
 use crate::popout::icons::{Content, PopoutIcons, pixel_size};
 use crate::popout::layout::{PopoutLayout, TitleButton};
 use crate::popout::painter::{ButtonStates, PopoutPainter};
+use crate::popout::palette::{self, PaletteLayout, PaletteText, PaletteView};
 use crate::popout::state::DockSide;
 use crate::render::composer::Composer;
 use crate::render::device::Renderer;
@@ -48,6 +49,26 @@ pub struct Popout {
     text: TextEngine,
     layout: PopoutLayout,
     scheme: Scheme,
+    /// **主窗口**当前的配色。
+    ///
+    /// 只有 [`Self::base_color`] 为空（"跟随主窗口"）时才会被用到，但两种
+    /// 情况都必须留着它：用户随时可能从"自己一套"切回"跟随主窗口"，
+    /// 那时要有东西可跟。
+    main_scheme: Scheme,
+    /// 这个窗口自己的基础色 `#RRGGBB`。**空串 = 跟随主窗口。**
+    ///
+    /// 真实的选色界面写在 `palette.rs` 的浮层里；这里存的是权威值 ——
+    /// 创建时从记录里取，用户每次选色改成新的。`persistable()` 会把它交回
+    /// 装配层落盘（见 `state::PopoutWindow::merge_persisted` 里那条分工）。
+    base_color: String,
+    /// 选色浮层上的两处文字（由装配层从 i18n 取好传进来）。
+    palette_text: PaletteText,
+    /// 选色浮层：`Some` = 正开着。存算好的布局，绘制与命中共用同一份
+    ///（两处各算一次就会出现"点中的和画出来的不是同一格"）。
+    picker: Option<PaletteLayout>,
+    /// 浮层里悬停的色块下标 / 是否悬停在"跟随主窗口"那一行。
+    hover_swatch: Option<usize>,
+    hover_follow: bool,
     /// 标题（用户自命名，或退回选项卡名）
     title: String,
     /// 这个弹窗对应哪个选项卡（配置里的稳定 key）。
@@ -104,7 +125,9 @@ impl Popout {
         tab_key: &str,
         title: &str,
         geometry: Geometry,
-        scheme: Scheme,
+        main_scheme: Scheme,
+        base_color: String,
+        palette_text: PaletteText,
         icon_size: i32,
         docked: bool,
         dock_side: DockSide,
@@ -137,7 +160,15 @@ impl Popout {
             painter: PopoutPainter::new(),
             text: TextEngine::new()?,
             layout,
-            scheme,
+            // 自己设过配色就用自己那套，否则跟随主窗口 —— 判据只有一处
+            //（`palette::resolve_scheme`），创建、换色、切换跟随都走它。
+            scheme: palette::resolve_scheme(&base_color, &main_scheme),
+            main_scheme,
+            base_color,
+            palette_text,
+            picker: None,
+            hover_swatch: None,
+            hover_follow: false,
             title: title.to_string(),
             tab_key: tab_key.to_string(),
             hover: None,
@@ -188,6 +219,11 @@ impl Popout {
         let (lw, lh) = logical_size(phys.0, phys.1, self.window.scale());
         self.layout = PopoutLayout::compute(lw, lh, self.content.icon_size);
         self.sync_icon_size();
+        // 选色浮层跟着内容区走：拖动边框时它必须重摆，否则绘制与命中
+        // 会对着旧矩形 —— 表现是"点到的格子不是看到的那个"。
+        if self.picker.is_some() {
+            self.picker = Some(PaletteLayout::compute(self.layout.content));
+        }
     }
 
     /// 让图标管线的请求边长跟上当前的图标尺寸与窗口 DPI。
@@ -231,7 +267,13 @@ impl Popout {
             dock_side: self.dock_side,
             pinned: self.pinned,
             name: None, // 装配层自己那份记录里已经有名字，别用这里覆盖它
-            base_color: String::new(),
+            // **把自己那份配色交回去。**
+            //
+            // 早先这里是 `String::new()`（默认值），所以装配层必须"保留记录里的
+            // `base_color`"才不至于把它抹掉 —— 但那条保护反过来会让用户选的颜色
+            // 被静默丢弃（当时生效、重启就没了）。现在窗口持有权威值，
+            // 装配层按 `merge_persisted` 的分工用它。
+            base_color: self.base_color.clone(),
         };
         w.normalize();
         w
@@ -344,6 +386,104 @@ impl Popout {
         self.docked
     }
 
+    /// 装配层换了主窗口配色。**只有"跟随主窗口"的窗口要动。**
+    ///
+    /// 返回是否需要重绘。有自己配色的窗口完全不受影响 —— 这正是
+    /// "不影响主窗口、也不被主窗口影响"这条需求的反方向。
+    pub fn set_main_scheme(&mut self, scheme: Scheme) -> bool {
+        let changed = self.main_scheme != scheme;
+        self.main_scheme = scheme;
+        if !changed || !palette::follows_main(&self.base_color) {
+            return false;
+        }
+        self.scheme = palette::resolve_scheme(&self.base_color, &self.main_scheme);
+        true
+    }
+
+    /// 配色按钮：开关选色浮层。
+    ///
+    /// 布局在这里算一次并**存下来**，绘制与命中共用同一份 —— 两处各算一次
+    /// 就会出现"点中的和画出来的不是同一格"。
+    pub fn toggle_picker(&mut self) -> bool {
+        match self.picker.take() {
+            Some(_) => {
+                // 再点一次按钮 = 关掉。这是"浮层可以被同一个人两个动作关掉"
+                // 里的第一个（另两个：点浮层外面、Esc）。
+                self.hover_swatch = None;
+                self.hover_follow = false;
+                true
+            }
+            None => {
+                self.picker = Some(PaletteLayout::compute(self.layout.content));
+                true
+            }
+        }
+    }
+
+    /// 关掉选色浮层（点别处 / Esc / 失去焦点）。返回是否真的关掉了。
+    pub fn close_picker(&mut self) -> bool {
+        if self.picker.take().is_none() {
+            return false;
+        }
+        // 悬停状态跟着作废：留着它会让下次打开时有一个"凭空的"高亮格子。
+        self.hover_swatch = None;
+        self.hover_follow = false;
+        true
+    }
+
+    /// 选中一个基础色。`None` = 跟随主窗口。
+    ///
+    /// 立即换掉本窗口的整套配色（所见即所得），并回报装配层落盘。
+    /// **不碰主窗口**：`main_scheme` 只读。
+    fn pick_color(&mut self, hex: Option<&str>) -> bool {
+        let next = hex.unwrap_or("").to_string();
+        if next == self.base_color {
+            return false;
+        }
+        self.base_color = next;
+        self.scheme = palette::resolve_scheme(&self.base_color, &self.main_scheme);
+        crate::diag::log(&format!(
+            "弹窗配色: {} ({})",
+            if self.base_color.is_empty() {
+                "跟随主窗口"
+            } else {
+                &self.base_color
+            },
+            self.tab_key
+        ));
+        // 落盘靠装配层（状态归它管，见 `state.rs` 的分工）；
+        // `persistable()` 会把新的 `base_color` 一起交回去。
+        crate::popout::report::report_changed(&self.tab_key);
+        true
+    }
+
+    /// 选色浮层开着时，处理一次点击。返回 `Some(是否需要重绘)`；
+    /// `None` 表示"浮层没开，这次点击与它无关"。
+    ///
+    /// 抽成一个函数是因为"点浮层里 = 选色 / 点浮层外 = 关闭"必须确定性地
+    /// 先于其它点击逻辑（方格启动、标题栏拖动）判一次，否则浮层开着时
+    /// 点空白会顺手启动一个程序。
+    fn on_picker_click(&mut self, lx: i32, ly: i32) -> Option<bool> {
+        let layout = self.picker.as_ref()?;
+        if layout.swatch_at(lx, ly).is_some() || layout.is_follow(lx, ly) {
+            let hex = layout
+                .swatch_at(lx, ly)
+                // 用 `palette_hex` 而不是 `BASE_PALETTE[i]`：格子是按过滤后的
+                // 颜色列表摆的，直接索引原表会在有项解析失败时错位。
+                .and_then(crate::config::theme::palette_hex);
+            let changed = self.pick_color(hex);
+            // 选完**不关浮层**：使用者多半想连着试几个颜色，这与主窗口
+            // 设置面板"点色块不关闭面板"是同一条理由。
+            return Some(changed);
+        }
+        if layout.contains(lx, ly) {
+            // 点在浮层内部的空白处：什么也不做，但也**不**穿透到下面的方格。
+            return Some(false);
+        }
+        // 点在浮层外面 = 关闭意图，并吃掉这次点击（不启动方格、不拖窗口）。
+        Some(self.close_picker())
+    }
+
     /// 窗口还活着吗。
     ///
     /// 装配层在落盘前问它：已销毁的窗口读位置会得到 `(0,0)`，那是**合法坐标**，
@@ -383,12 +523,23 @@ impl Popout {
     pub fn sync_visibility(&self, main_visible: bool) -> bool {
         if self.pinned {
             // 需求："钉的作用就只是留在桌面，不随主体最小化。"
-            return false;
-        }
-        if self.window.is_visible() == main_visible {
+            //
+            // **但要放行"显示"**：窗口可能是启动时按 `start_hidden` 建出来的
+            //（创建了但没显示），那时只忽略"隐藏"会让它永远出不来 ——
+            // 从"主窗口收进托盘"回到"主窗口显示"之后，钉住的窗口就没机会
+            // 再被显示一次。隐藏仍然忽略（这才是钉住的用处）。
+            if !main_visible {
+                return false;
+            }
+        } else if self.window.is_visible() == main_visible {
+            // 状态已经对了就不动：`ShowWindow` 每次都发一堆消息，
+            // 而显隐是低频动作，这里省下来的是无谓的消息风暴。
             return false;
         }
         if main_visible {
+            if self.window.is_visible() {
+                return false;
+            }
             self.window.show();
         } else {
             self.window.hide();
@@ -472,6 +623,23 @@ impl Handler for Popout {
             Event::MouseMove { x, y } => {
                 let (lx, ly) = self.to_logical(x, y);
                 let mut redraw = false;
+                // 浮层开着时，悬停只归它 —— 它下面的标题栏按钮不该有悬停反馈
+                //（浮层铺了一层压暗，按钮看起来已经是"背景"了）。
+                //
+                // 先算出结果再写字段：`as_ref()` 借着 `self.picker`，
+                // 同一个作用域里赋值会被借用检查器拦下。
+                let picker_hover = self
+                    .picker
+                    .as_ref()
+                    .map(|pl| (pl.swatch_at(lx, ly), pl.is_follow(lx, ly)));
+                if let Some((sw, fo)) = picker_hover {
+                    if (sw, fo) != (self.hover_swatch, self.hover_follow) {
+                        self.hover_swatch = sw;
+                        self.hover_follow = fo;
+                        redraw = true;
+                    }
+                    return redraw;
+                }
                 let h = self.layout.button_at(lx, ly);
                 if h != self.hover {
                     self.hover = h;
@@ -505,6 +673,19 @@ impl Handler for Popout {
             }
             Event::MouseDown { x, y } => {
                 let (lx, ly) = self.to_logical(x, y);
+                // 配色按钮**最优先**：它就是浮层的开关，开着时再点它就该是"关"。
+                // （浮层摆在内容区里，盖不到标题栏，所以这里必须显式判它，
+                //   否则会被下面的"点浮层外面 = 关闭"分支吃掉，看起来像是
+                //   "点按钮关不掉"。）
+                if self.layout.button_at(lx, ly) == Some(TitleButton::Color) {
+                    self.press = None;
+                    return self.toggle_picker();
+                }
+                // 浮层开着时，这次点击先归它：点色块 = 选色、点外面 = 关闭。
+                // **必须吃掉**，否则点空白处会顺手启动一个方格里的程序。
+                if let Some(redraw) = self.on_picker_click(lx, ly) {
+                    return redraw;
+                }
                 match self.layout.button_at(lx, ly) {
                     // 关闭：`WM_CLOSE` 走 `on_close_request`。
                     // 本窗口不是主窗口，所以销毁它**不会**结束消息循环
@@ -524,6 +705,8 @@ impl Handler for Popout {
                         self.press = None;
                         self.toggle_pin()
                     }
+                    // `Color` 在上面就返回了（它是浮层开关，要先于浮层的
+                    // "点外面即关闭"判定）。这里兜住其余情况。
                     Some(_) => {
                         self.press = None;
                         false
@@ -573,6 +756,23 @@ impl Handler for Popout {
                 // 启动不改变本窗口的任何像素，所以不请求重绘。
                 false
             }
+            // Esc 关掉选色浮层。
+            //
+            // 常量本地定义：为一个虚拟键码去开 `KeyboardAndMouse` 那一整个
+            // feature 不划算，而**必须**是常量而不是 `let` 绑定 ——
+            // 变量绑定出现在 match 分支里会变成"捕获所有值"的模式，
+            // 后面所有分支静默不可达（`platform/window.rs` 里踩过一次）。
+            Event::KeyDown(vk) => {
+                const VK_ESCAPE: u32 = 0x1B;
+                if vk == VK_ESCAPE && self.picker.is_some() {
+                    return self.close_picker();
+                }
+                false
+            }
+            // 失去激活 = 用户点了别的窗口 → 浮层收起。
+            // 与主窗口右键菜单靠同一个事件关闭是同一条理由：点在别的窗口上时，
+            // 消息根本不会送到我们这里，"点外部关闭"是等不到的。
+            Event::FocusLost => self.close_picker(),
             _ => false,
         }
     }
@@ -632,6 +832,26 @@ impl Handler for Popout {
                 &self.content.items,
                 &bitmaps,
             );
+
+            // ---- 选色浮层（**最后画 = 最上层**）----
+            //
+            // 几何直接取存下来的那一份（与命中判定同一份），绘制不做几何决策。
+            // 借用说明：`pl` 借 `picker`，`&mut self.text` 是另一个字段，
+            // `&self.painter` 又是一个 —— 三者互不相干，借用检查器放行。
+            if let Some(pl) = self.picker.as_ref() {
+                let view = PaletteView {
+                    layout: pl,
+                    labels: &self.palette_text,
+                    scheme: &self.scheme,
+                    main_scheme: &self.main_scheme,
+                    // 判据只有一处（`theme::palette_index`），与主窗口一致：
+                    // 只有正好等于某个色板项才高亮。
+                    selected: crate::config::theme::palette_index(&self.base_color),
+                    hover_swatch: self.hover_swatch,
+                    hover_follow: self.hover_follow,
+                };
+                let _ = self.painter.draw_palette(&ctx, &mut self.text, &view);
+            }
         }
         let _ = self.renderer.end(if self.resizing { 0 } else { 1 });
         let _ = self.composer.commit();
