@@ -100,6 +100,13 @@ pub struct AppState {
     /// `BTreeMap` 按 key 排序输出，改了什么就只动那一处。
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub entries: BTreeMap<String, EntryOverride>,
+
+    /// 弹出子窗口的状态（每个选项卡最多一个，可同时开多个）。
+    ///
+    /// 键是选项卡的 `key`，与 `entries` 里 `group` 用的是同一套标识。
+    /// 为空时不写进文件（`skip_serializing_if`），保持 `state.toml` 干净。
+    #[serde(default, skip_serializing_if = "crate::popout::PopoutState::is_empty")]
+    pub popout: crate::popout::PopoutState,
 }
 
 impl AppState {
@@ -132,6 +139,13 @@ impl AppState {
         }
         if self.icon_size != 0 {
             self.icon_size = self.icon_size.clamp(16, 384);
+        }
+        // 弹出子窗口的每条记录同样收敛。
+        // **必须在这里调用**：`PopoutWindow::normalize` 只在 `PopoutState::set`
+        // 里被调用，而状态文件是可能被手改的 —— 手改进来的荒谬尺寸根本不经过
+        // `set`，不在这里兜住就会直接进布局算矩形。
+        for w in self.popout.windows.values_mut() {
+            w.normalize();
         }
     }
 }

@@ -21,6 +21,7 @@ mod i18n;
 mod model;
 mod paths;
 mod platform;
+mod popout;
 mod render;
 mod shell;
 mod state;
@@ -487,6 +488,83 @@ fn selftest() -> ExitCode {
                 "（正常：选框会跟着鼠标连续移动）"
             } else {
                 "  ⚠ 多数移动没请求重绘，选框会一格一跳"
+            }
+        );
+    }
+
+    // 弹出子窗口的状态模型。纯数据，没有窗口也能完整验证。
+    //
+    // 这一步在"窗口层还没改造成多窗口"之前就能做，正是把它单独成模块的好处：
+    // 取值规则（默认值、夹紧、互斥、排序）先测死，后面接窗口时就不必怀疑数据。
+    {
+        use popout::state::{MAX_H, MIN_W, PopoutState, PopoutWindow};
+
+        let mut failures: Vec<&str> = Vec::new();
+
+        // 默认值：默认吸附在主窗口右侧、不钉桌面、尺寸 320×420
+        let d = PopoutWindow::default();
+        if !(d.docked && !d.pinned && !d.open && d.width == 320 && d.height == 420) {
+            failures.push("默认值不对");
+        }
+
+        // 夹紧：荒谬尺寸要收进合法区间
+        let mut rough = PopoutWindow::default();
+        rough.width = 1;
+        rough.height = 99_999;
+        rough.normalize();
+        if rough.width != MIN_W || rough.height != MAX_H {
+            failures.push("尺寸未夹紧");
+        }
+
+        // 互斥：手改成 pinned + docked 同时为真时，以 pinned 为准
+        let mut both = PopoutWindow::default();
+        both.pinned = true;
+        both.docked = true;
+        both.normalize();
+        if both.docked {
+            failures.push("pinned 未压过 docked");
+        }
+
+        // get 不能写入（否则 state.toml 会随访问长大）
+        let mut ps = PopoutState::default();
+        let _ = ps.get("不存在的");
+        if !ps.is_empty() {
+            failures.push("get 写入了记录");
+        }
+
+        // to_open 只取开着的，且按 key 排序（多个窗口的创建顺序必须稳定）
+        for (k, open) in [("tab3", false), ("tab1", true), ("tab2", true)] {
+            let mut w = PopoutWindow::default();
+            w.open = open;
+            ps.set(k, w);
+        }
+        let opened: Vec<&str> = ps.to_open().iter().map(|(k, _)| *k).collect();
+        if opened != vec!["tab1", "tab2"] {
+            failures.push("to_open 顺序或筛选不对");
+        }
+
+        // retain_tabs：选项卡被删掉后，它的窗口状态必须能被清掉
+        let live: std::collections::HashSet<String> =
+            ["tab1".to_string()].into_iter().collect();
+        let removed = ps.retain_tabs(&live);
+        if removed != 2 || ps.windows.len() != 1 {
+            failures.push("retain_tabs 清理数不对");
+        }
+
+        // 标题回退：没自命名时用选项卡名，自命名后用自己的
+        let unnamed = PopoutWindow::default();
+        let mut named = PopoutWindow::default();
+        named.name = Some("我的面板".to_string());
+        if unnamed.title("主窗口") != "主窗口" || named.title("主窗口") != "我的面板" {
+            failures.push("标题回退不对");
+        }
+
+        println!(
+            "弹出窗状态 : {}",
+            if failures.is_empty() {
+                "默认值 / 尺寸夹紧 / pinned 压过 docked / get 不写入 / to_open 排序 / retain_tabs / 标题回退 —— 全部通过".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("、"))
             }
         );
     }
