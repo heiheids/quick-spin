@@ -1668,8 +1668,23 @@ impl App {
         } else {
             self.window.hide();
         }
+        self.sync_popout_visibility();
+    }
+
+    /// 让弹窗的显隐跟上主窗口。**唯一的不变式**：
+    ///
+    /// > 弹窗可见 ⟺ （主窗口可见 **且** 未最小化）或者它被钉住。
+    ///
+    /// 显隐有三个来源：托盘/热键的收起、标题栏上的最小化按钮、以及系统层面的
+    /// 最小化（`Win+D`、任务栏右键 → 最小化、点任务栏按钮）。前两个走
+    /// `set_main_visible`，第三个**绕过它**（只有 `WM_SIZE`）。
+    ///
+    /// 把判断归到这一条不变式上，就不必在每个来源各写一遍 ——
+    /// 漏一处的表现是"钉住语义没生效"，而那只会在用 `Win+D` 时被发现。
+    fn sync_popout_visibility(&mut self) {
+        let should_show = self.window.is_visible() && !self.window.is_minimized();
         for p in self.popouts.values() {
-            p.sync_visibility(visible);
+            p.sync_visibility(should_show);
         }
     }
 
@@ -4564,6 +4579,9 @@ impl Handler for App {
                 // 主窗口改尺寸会改吸附位（弹窗贴着它的边），所以跟着摆一次。
                 // 与 `Moved` 一样：事件驱动，不是每帧。
                 self.follow_popouts();
+                // 最小化 / 从最小化还原也只有 `WM_SIZE` 这一条线索
+                //（`Win+D` 之类不走我们的显隐入口），所以在这里对一次显隐。
+                self.sync_popout_visibility();
                 true
             }
             // 主窗口被移动（用户拖标题栏 / 系统 Snap）。
