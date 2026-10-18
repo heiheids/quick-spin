@@ -101,12 +101,6 @@ fn copy_shortcut_in(
     Ok(dest)
 }
 
-/// 拖入的条目最多等几轮扫描来归属（见 `App::pending_groups`）。
-///
-/// 取 3：扫描是异步的，一轮未必收录得进来；但等太多轮说明这个文件压根不会
-/// 出现（复制失败 / 被判坏条目），再等只是白占内存。
-const PENDING_TRIES: u8 = 3;
-
 /// 就地编辑的目标。
 enum EditTarget {
     /// 方格条目。存**覆盖表的键**（`.lnk` 完整路径）而不是下标：
@@ -502,22 +496,6 @@ pub struct App {
     /// 指针立刻失效 —— 那是未定义行为，而且不一定当场崩。
     popouts: std::collections::BTreeMap<String, Box<crate::popout::window::Popout>>,
 
-    /// 拖入后**待归属**的分组：`(覆盖键, 选项卡 key, 还能等几轮扫描)`。
-    ///
-    /// ## 为什么不在拖入时就写 `group`
-    ///
-    /// 扫描是异步的，而且很可能**在复制之前就有一次扫描在飞**。那次扫描完成时
-    /// 列表里还没有新文件，`prune_overrides` 会把刚写的 `group` 当孤儿删掉；
-    /// 之后条目被扫描收录时已经没有分组，于是回落到主窗口
-    ///（`Library::view` 里"没有显式分组的算主窗口"）。
-    ///
-    /// 表现就是使用者报的："不管在哪个页面拖进来，条目都丢进主窗口。"
-    ///
-    /// 改成**等扫描真的收录了它再写**，顺序就理顺了，不再依赖扫描的快慢。
-    /// 同一类坑在"添加系统程序"那条路径上已经踩过一次（见 `add_app` 的注释），
-    /// 那条是先检查目标存在堵住的，这条当时没堵。
-    pending_groups: Vec<(String, String, u8)>,
-
     /// 上次推给弹出子窗口时用的内容签名（见 `sync_popouts`）。
     popout_sync_sig: (usize, usize, f32),
 
@@ -822,7 +800,6 @@ impl App {
             exit_requested: false,
             popouts: std::collections::BTreeMap::new(),
             popout_sync_sig: (usize::MAX, usize::MAX, f32::MAX),
-            pending_groups: Vec::new(),
             menu: None,
             menu_hover: None,
             editing: None,
@@ -1132,9 +1109,6 @@ impl App {
 
         self.library = Library::new(report.items);
         self.assign_new_order(&before);
-        // **必须在 `prune_overrides` 之前**：待归属的分组要赶在清理之前落到
-        // 已收录的条目上，否则刚写上的分组会被这一轮的清理删掉。
-        self.apply_pending_groups();
         self.prune_overrides();
         self.normalize_groups();
         self.refresh_view();
@@ -1282,6 +1256,20 @@ impl App {
     ///
     /// **不会误删"隐藏"标记**：删除只写覆盖表、不动文件，
     /// 所以被隐藏的条目文件仍在清单里，不会命中这条清理。
+    ///
+    /// ## 判据是"文件还在不在"，不是"这次扫描有没有收录它"
+    ///
+    /// 这两个条件**不等价**，差别正是几个 bug 的来源：
+    ///
+    /// * 扫描是异步的。一次在拖入**之前**开始、拖入**之后**才回来的扫描，
+    ///   它的列表里没有刚复制的那个文件；若按"没收录就清掉"处理，
+    ///   刚登记的归属会被这轮清理当孤儿删掉 —— 用户看到条目消失，
+    ///   下次扫描再出现时已经回落到主窗口。
+    /// * 目标临时不可用的条目（U 盘拔了）会被扫描判为失效而**不收录**，
+    ///   但它不该因此丢掉用户设置过的隐藏 / 改名 / 分组。
+    ///
+    /// 目录里通常只有几十个条目，每条一次 `metadata` 是微秒级开销，
+    /// 而扫描本身是低频操作，这点代价换"清理不会误伤"是划算的。
     fn prune_overrides(&mut self) {
         let live: std::collections::HashSet<String> = (0..self.library.total())
             .filter_map(|i| self.library.get(i))
@@ -1295,7 +1283,7 @@ impl App {
         self.state
             .get_mut()
             .entries
-            .retain(|key, _| live.contains(key));
+            .retain(|key, _| live.contains(key) || std::path::Path::new(key).is_file());
         let removed = before - self.state.get().entries.len();
         if removed > 0 {
             if let Err(e) = self.state.save() {
@@ -1552,33 +1540,6 @@ impl App {
                 }
             }
         }
-    }
-
-    /// 把待归属的分组写到**扫描已经收录**的条目上。
-    ///
-    /// 每轮扫描调用一次。见 `pending_groups` 的字段说明。
-    fn apply_pending_groups(&mut self) {
-        if self.pending_groups.is_empty() {
-            return;
-        }
-        let live: std::collections::HashSet<String> = (0..self.library.total())
-            .filter_map(|i| self.library.get(i))
-            .map(crate::model::library::path_key)
-            .collect();
-
-        let mut rest = Vec::new();
-        for (key, group, tries) in std::mem::take(&mut self.pending_groups) {
-            if live.contains(&key) {
-                let mut ov = self.state.get().entry(&key);
-                ov.group = Some(group);
-                self.state.get_mut().set_entry(&key, ov);
-            } else if tries > 1 {
-                rest.push((key, group, tries - 1));
-            }
-            // 用完次数仍没出现：多半是复制失败、或被扫描判为坏条目。
-            // 丢掉它，不让这张表无限增长。
-        }
-        self.pending_groups = rest;
     }
 
     /// 打开 / 关闭某选项卡的弹出子窗口（侧栏右键菜单的入口）。    ///
@@ -2247,13 +2208,9 @@ impl App {
             return false;
         }
 
-        let group = self
-            .tabs
-            .get(self.active_tab)
-            .map(|t| t.key.clone())
-            .unwrap_or_else(|| crate::config::model::MAIN_TAB.to_string());
-
-        let mut added = 0usize;
+        // 落盘的路径先攒着，循环结束后统一登记归属。
+        // 归属规则只有一份（见 `assign_to_active_tab`），复制过程里不掺状态写入。
+        let mut landed: Vec<std::path::PathBuf> = Vec::new();
         for src in &paths {
             // 只收快捷方式。拖进来一个 exe 或图片并不是"添加条目"的意图，
             // 静默忽略比自作主张地生成快捷方式更安全（后者会改动用户的文件布局）。
@@ -2265,25 +2222,22 @@ impl App {
             }
             match copy_shortcut_in(src, &dir) {
                 Ok(dest) => {
-                    // **不在这里写分组**，改成登记一条"待归属"，
-                    // 等扫描确认收录了这个文件再写（见 `pending_groups` 的说明）。
-                    // 当场写会被紧随其后的 `prune_overrides` 当孤儿清掉。
-                    let key = dest.to_string_lossy().into_owned();
-                    self.pending_groups.push((key, group.clone(), PENDING_TRIES));
-                    added += 1;
+                    // 文件此刻已经躺在快捷方式目录里，所以可以立刻登记归属：
+                    // 下面的 `rescan` 一定会收录它，`prune_overrides`
+                    // 不会把这条件记录当孤儿清掉。
+                    landed.push(dest);
                 }
                 Err(e) => eprintln!("复制快捷方式失败 [{}]: {e}", src.display()),
             }
         }
 
-        if added > 0 {
-            if let Err(e) = self.state.save() {
-                eprintln!("保存条目设置失败: {e}");
-            }
-            // 重新扫描自己的目录，新条目才会出现
-            self.rescan();
+        if landed.is_empty() {
+            return false;
         }
-        added > 0
+        self.assign_to_active_tab(landed);
+        // 重新扫描自己的目录，新条目才会出现
+        self.rescan();
+        true
     }
 
     fn draw(&mut self) -> Result<()> {
@@ -3089,9 +3043,15 @@ impl App {
         use MenuCommand::*;
         let overrides = self.state.get().entries.clone();
 
+        // 任何选项卡（**包括主界面**）只要有条目就不给删。
+        //
+        // 这里原本写的是 `tab.key != "all"`，配的解释是"主界面是显示全部的视图"。
+        // 两个说法现在都不成立：按需求主界面就是**和别的选项卡一样的一个分组**，
+        // 而 `MAIN_TAB` 的值是 `"main"`，永远不等于 `"all"` ——
+        // 也就是说那条"主界面不可删除"的分支其实从未生效过，
+        // 主界面一直在走下面的条目数判断。这里把条件写成事实，行为不变。
         let deletable = match self.tabs.get(tab_index) {
-            // 主界面（全部）不允许删除：它是"显示全部"的视图，删了就无处可看。
-            Some(tab) if tab.key != "all" => {
+            Some(tab) => {
                 let count = self.library.count_in(tab, &overrides);
                 if count == 0 {
                     None
@@ -3099,7 +3059,6 @@ impl App {
                     Some("该选项卡还有条目")
                 }
             }
-            Some(_) => Some("主界面不可删除"),
             None => Some("选项卡不存在"),
         };
 
@@ -3464,20 +3423,52 @@ impl App {
         true
     }
 
-    /// 把一个刚生成的快捷方式登记到当前选项卡，并重新扫描让它出现。
-    fn register_new_entry(&mut self, dest: &std::path::Path) {
+    /// 把一批**已经落盘**的条目归到当前选项卡，并立刻写入状态文件。
+    ///
+    /// ## 前提：文件必须已经在快捷方式目录里
+    ///
+    /// 归属靠覆盖表的键，而键是 `.lnk` 的完整路径（见 `model::library::path_key`）。
+    /// 键有了、文件却还没落盘的话，紧跟着的那次 `prune_overrides` 会把这条件记录
+    /// 当孤儿清掉，条目于是回落到主窗口。两条拖入路径都满足这个前提：
+    /// `WM_DROPFILES`（`on_files_dropped` 复制完才调这里）、
+    /// OLE 拖放目标（`drop_target` 落完盘才发消息）。
+    ///
+    /// ## 为什么立刻 `save`
+    ///
+    /// 状态是"随用随写"的：只改内存不落盘的话，之后任何一次
+    /// `reload_if_changed` 或崩溃都会让这次归属白做。归属是用户的一次明确动作，
+    /// 值得一次磁盘写（拖放本身是低频操作）。
+    fn assign_to_active_tab(&mut self, dests: impl IntoIterator<Item = std::path::PathBuf>) {
         let group = self
             .tabs
             .get(self.active_tab)
             .map(|t| t.key.clone())
             .unwrap_or_else(|| crate::config::model::MAIN_TAB.to_string());
-        let key = dest.to_string_lossy().into_owned();
-        let mut ov = self.state.get().entry(&key);
-        ov.group = Some(group);
-        self.state.get_mut().set_entry(&key, ov);
-        if let Err(e) = self.state.save() {
-            eprintln!("保存条目设置失败: {e}");
+
+        let mut changed = false;
+        for dest in dests {
+            let key = dest.to_string_lossy().into_owned();
+            let mut ov = self.state.get().entry(&key);
+            if ov.group.as_deref() == Some(group.as_str()) {
+                // 重复拖入同一个文件（`unique_dest` 会给它加序号，一般不会撞，
+                // 但 shell 项可能同名）时不必再写盘。
+                continue;
+            }
+            ov.group = Some(group.clone());
+            self.state.get_mut().set_entry(&key, ov);
+            changed = true;
         }
+
+        if changed {
+            if let Err(e) = self.state.save() {
+                eprintln!("保存条目归属失败: {e}");
+            }
+        }
+    }
+
+    /// 把一个刚生成的快捷方式登记到当前选项卡，并重新扫描让它出现。
+    fn register_new_entry(&mut self, dest: &std::path::Path) {
+        self.assign_to_active_tab([dest.to_path_buf()]);
         self.rescan();
     }
 
@@ -4321,8 +4312,17 @@ impl Handler for App {
             Event::Char(c) => self.on_char(c),
             Event::FilesDropped { paths } => self.on_files_dropped(paths),
             Event::ExternalDrop => {
-                // 落盘已经在拖放目标里做完了，这里只需重新扫描让它出现。
-                // 归属分组也由那边按"当前选项卡"登记过了。
+                // 落盘已经在拖放目标里做完了（见 `platform::drop_target`），
+                // 但**归属必须由这里决定**：那边只跟文件系统打交道，
+                // 看不到当前选中的是哪个选项卡。
+                //
+                // 早先这里只做 `rescan`，注释还写着"归属也由那边登记过了"——
+                // 那句是错的，那边从来没有分组逻辑。结果是：资源管理器的拖动
+                // 走的正是这条 OLE 路径（见该模块开头的说明），
+                // 于是拖进来的条目永远没有分组，按 `Library::view` 的规则
+                // 回落主窗口 —— 表现就是"在哪个页面拖入都进主窗口"。
+                let dests = crate::platform::drop_target::take_dropped();
+                self.assign_to_active_tab(dests);
                 self.rescan();
                 true
             }

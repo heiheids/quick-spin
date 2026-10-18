@@ -17,6 +17,9 @@
 //! "有新东西了，重新扫描"的消息。这样做省掉了把结果对象塞进事件流、
 //! 再让上层逐个分配目标的整套传递 —— 拖放是低频操作，直接落盘最省事。
 //!
+//! 但**落盘的路径要攒下来**（见 [`take_dropped`]）：新条目该归到哪个选项卡
+//! 是界面状态，本模块看不到，只能由上层在收到消息后决定。
+//!
 //! 判定规则：
 //!
 //! * 本身是 `.lnk` → **原样复制**（保留它内部的参数/工作目录/图标设置）
@@ -25,6 +28,7 @@
 //!   该解析名为参数的快捷方式
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use windows::Win32::Foundation::{HWND, POINTL};
 // 这些类型分散在四个模块里，是照 crate 实际定义确认过的：
@@ -53,6 +57,42 @@ use windows::core::{Ref, Result, implement};
 /// 取值是 `WM_APP + 2`：`WM_APP + 1` 已被 `window.rs` 的 `WM_APP_REDRAW` 占用。
 /// 撞号会导致两条消息互相吞掉，而"重绘被吞"的症状是界面偶尔不刷新，极难定位。
 pub const WM_DROP_COMPLETED: u32 = WM_APP + 2;
+
+/// 本次投放已经落盘的路径，等上层取走（见 [`take_dropped`]）。
+///
+/// 为什么用静态而不是让事件带数据：`PostMessageW` 只有两个整数参数，
+/// 想在事件里传 `Vec<PathBuf>` 就得自己分配一块内存、再约定由谁释放。
+/// 拖放是低频操作，一块全局缓冲足够，也避免了在 OLE 调用栈里重入界面逻辑。
+///
+/// `Drop` 回调和 `WM_DROP_COMPLETED` 的处理都在**同一个 UI 线程**上
+///（`OleInitialize` 用的是 STA，就是建窗口的那个线程），
+/// 所以这里并不存在真正的并发；用 `Mutex` 只是为了让静态变量合法 ——
+/// `Vec` 可以 const 构造，但可变静态需要一层同步原语。
+static DROPPED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// 取走并清空"本次投放落盘的路径"。
+///
+/// 上层据此把新条目归到当前选项卡。返回空表示这次投放什么都没落成
+///（例如格式解析失败），调用方照常重新扫描即可。
+pub fn take_dropped() -> Vec<PathBuf> {
+    lock().drain(..).collect()
+}
+
+/// 记下一条已落盘的路径。
+fn remember(path: PathBuf) {
+    lock().push(path);
+}
+
+/// 取那个静态缓冲。
+///
+/// 中毒（持锁时 panic）时取回内部值继续用：拖放数据丢了最多是"条目没归类"，
+/// 不该让整个程序跟着崩。
+fn lock() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    match DROPPED.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// 注册到窗口上的拖放目标。
 ///
@@ -118,6 +158,7 @@ impl IDropTarget_Impl for ShellDropTarget_Impl {
                         match store_one(&display, &parsing) {
                             Ok(path) => {
                                 eprintln!("拖入：{} → {}", display, path.display());
+                                remember(path);
                                 done += 1;
                             }
                             Err(e) => eprintln!("拖入「{display}」失败: {e}"),
