@@ -217,6 +217,7 @@ struct FrameStat {
     total_ms: f32,
     worst_ms: f32,
     moves: u32,
+    move_ms: f32,
 }
 
 impl FrameStat {
@@ -227,30 +228,49 @@ impl FrameStat {
             total_ms: 0.0,
             worst_ms: 0.0,
             moves: 0,
+            move_ms: 0.0,
         }
     }
 
-    /// 记一次鼠标移动。用来和帧数对照：两者差距大说明重绘被合并了（好事）。
-    fn note_move(&mut self) {
+    /// 记一次鼠标移动**及其处理耗时**。
+    ///
+    /// 一定要连耗时一起记：只有次数的话，无法区分"移动很多但每次都很便宜"
+    /// 与"移动不多但每次都很贵"，而这两者的修法完全不同。
+    fn note_move(&mut self, ms: f32) {
         self.moves += 1;
+        self.move_ms += ms;
     }
 
-    fn sample(&mut self, ms: f32) {
+    fn sample(&mut self, ms: f32, glass: bool) {
         self.frames += 1;
         self.total_ms += ms;
         if ms > self.worst_ms {
             self.worst_ms = ms;
         }
-        if self.since.elapsed().as_secs_f32() < 1.0 {
+        // **注意**：本函数只在绘制时被调用，所以窗口长度由
+        // `since.elapsed()` 决定，绘制稀时窗口会被拉长。
+        // 因此下面必须把窗口时长一起打出来 —— 只报"帧数"会被读成"帧/秒"，
+        // 那是错的（第一版就犯了这个错）。
+        let secs = self.since.elapsed().as_secs_f32();
+        if secs < 1.0 {
             return;
         }
-        if self.frames >= 20 {
+        // 抽屉门槛：窗口里至少要有几帧才值得记，否则空闲时也会每秒写一行。
+        if self.frames >= 10 {
+            let f = self.frames as f32;
+            let m = self.moves as f32;
             diag(&format!(
-                "帧统计: {} 帧/秒  绘制 平均 {:.1}ms / 最慢 {:.1}ms  同秒鼠标移动 {} 次",
-                self.frames,
-                self.total_ms / self.frames as f32,
+                "帧统计: 外圈玻璃={} | 窗口 {secs:.2}s | 绘制 {f} 帧（{:.0} fps）平均 {:.2}ms 最慢 {:.2}ms 合计 {:.0}ms | \
+                 鼠标移动 {m} 次（{:.0}/s）处理平均 {:.3}ms 合计 {:.0}ms | 两者合计占窗口 {:.0}%",
+                if glass { "开" } else { "关" },
+                f / secs,
+                self.total_ms / f,
                 self.worst_ms,
-                self.moves
+                self.total_ms,
+                m / secs,
+                if m > 0.0 { self.move_ms / m } else { 0.0 },
+                self.move_ms,
+                (self.total_ms + self.move_ms) / (secs * 1000.0) * 100.0
             ));
         }
         self.since = std::time::Instant::now();
@@ -258,6 +278,7 @@ impl FrameStat {
         self.total_ms = 0.0;
         self.worst_ms = 0.0;
         self.moves = 0;
+        self.move_ms = 0.0;
     }
 }
 
@@ -470,6 +491,13 @@ pub struct App {
 
     /// 帧耗时统计（只在持续重绘时写 `诊断.log`，见 [`FrameStat`]）。
     frame_stat: FrameStat,
+
+    /// 累计发起过多少次图标请求（只用于自检判定"是否有永远提取不成功的图标"）。
+    ///
+    /// 正常情况下每个图标只请求一次、落地后就不再请求，所以这个计数应当很快
+    /// 停止增长。若它随帧数线性增长，说明有图标**每帧都在重试** ——
+    /// 那会让加载线程一直做白工，并把 UI 一起拖慢。
+    icon_requests: u32,
 
     /// 正在录制全局热键。
     ///
@@ -730,6 +758,7 @@ impl App {
             tile_drop: None,
             marquee: None,
             frame_stat: FrameStat::new(),
+            icon_requests: 0,
             menu_anchor: (0, 0),
             resizing: false,
         })
@@ -934,6 +963,28 @@ impl App {
         }
         self.resizing = saved;
         (total / (frames - 1) as f32, worst)
+    }
+
+    /// 自检用：先空转 `warmup` 帧让能落地的图标都落地，再连画 `frames` 帧，
+    /// 返回这段里**重新发起**的图标请求次数。
+    ///
+    /// 正常情况下应当为 **0**：每个图标只请求一次，落地后进缓存就不再请求。
+    /// 若它随帧数线性增长，说明有图标**永远提取不成功**，而每帧都在重试 ——
+    /// 加载线程会一直做白工，UI 每帧重绘都在催它，拖动就会明显卡。
+    /// 这是纯逻辑，自检即可判定，不需要开界面。
+    pub fn selftest_icon_rerequests(&mut self, warmup: usize, frames: usize) -> u32 {
+        for _ in 0..warmup {
+            if self.draw().is_err() {
+                return 0;
+            }
+        }
+        let before = self.icon_requests;
+        for _ in 0..frames {
+            if self.draw().is_err() {
+                break;
+            }
+        }
+        self.icon_requests.saturating_sub(before)
     }
 
     /// 采纳扫描结果。
@@ -1372,6 +1423,7 @@ impl App {
                 Some(bitmap) => out.push(Some(bitmap.clone())),
                 None => {
                     self.loader.request(key);
+                    self.icon_requests = self.icon_requests.saturating_add(1);
                     out.push(None);
                 }
             }
@@ -3638,8 +3690,22 @@ impl App {
         diag("launch_tile 结束");
     }
 
+    /// 鼠标移动：计时外壳。
+    ///
+    /// 单独包一层只是为了量"每次移动的处理耗时"，逻辑全在
+    /// [`App::on_mouse_move_inner`] 里。之所以要量：拖动时的每一帧
+    /// **都必须处理完当前积压的全部移动消息才绘制一次**（见 `window::message_loop`），
+    /// 所以单次移动的耗时会被放大成"每帧的额外开销"，是拖动卡顿
+    /// 最可能的藏身处，而它恰恰不包含在"绘制耗时"里。
     fn on_mouse_move(&mut self, x: i32, y: i32) -> bool {
-        self.frame_stat.note_move();
+        let t = std::time::Instant::now();
+        let result = self.on_mouse_move_inner(x, y);
+        self.frame_stat
+            .note_move(t.elapsed().as_secs_f32() * 1000.0);
+        result
+    }
+
+    fn on_mouse_move_inner(&mut self, x: i32, y: i32) -> bool {
         let (lx, ly) = self.to_logical(x, y);
 
         // ---- 方格拖拽中 ----
@@ -3899,7 +3965,11 @@ impl Handler for App {
     fn paint(&mut self) {
         let t = std::time::Instant::now();
         let result = self.draw();
-        self.frame_stat.sample(t.elapsed().as_secs_f32() * 1000.0);
+        let ms = t.elapsed().as_secs_f32() * 1000.0;
+        // 先取标志再调 `sample`：`sample` 要可变借用 `frame_stat`，
+        // 而 `self.outer_glass()` 借用整个 `self`，直接写在实参里会冲突。
+        let glass = self.outer_glass();
+        self.frame_stat.sample(ms, glass);
         if let Err(e) = result {
             eprintln!("绘制失败: {e}");
         }

@@ -71,9 +71,26 @@ pub struct Loader {
     rx: Receiver<Loaded>,
     /// 已经发出去、还没收回来的键。避免每帧重复请求同一个图标。
     in_flight: HashSet<Key>,
+    /// **已经失败过**的键。提取不成功的一律不再重试。
+    ///
+    /// 这张表是必须的，不是优化。缺了它就会出现"每帧重试"：
+    /// `poll()` 会把结果从 `in_flight` 里摘掉，而失败的图标不会进缓存，
+    /// 于是下一帧 `collect_icons` 发现缓存里没有 → 再请求一次 →
+    /// 工作线程再跑一次注定失败的 shell 提取 → 如此往复。
+    ///
+    /// 拖动时每帧都重绘，这个环就被驱动到帧率 —— 实测 10 个方格里有 7 个
+    /// 图标处于这种状态，30 帧内重复请求 **211 次**。加载线程被这种白工占满，
+    /// 界面自然又卡又不跟手，而且这笔开销**完全不体现在"绘制耗时"里**。
+    ///
+    /// 用"满了就整体清空"来限制规模，顺带获得周期性重试的机会
+    /// （比如某个文件后来才有图标）。换图标尺寸会自然生成新键，不受影响。
+    failed: HashSet<Key>,
     /// 工作线程句柄，Drop 时 join，避免线程泄漏
     join: Option<std::thread::JoinHandle<()>>,
 }
+
+/// `failed` 的规模上限。超过就整体清空：既封住内存，又给失败项一个重试窗口。
+const FAILED_MEMO: usize = 256;
 
 impl Loader {
     /// 启动加载线程。`notify` 用于在结果就绪时唤醒 UI。
@@ -90,12 +107,16 @@ impl Loader {
             tx: Some(req_tx),
             rx: res_rx,
             in_flight: HashSet::new(),
+            failed: HashSet::new(),
             join: Some(handle),
         }
     }
 
-    /// 请求一个图标。已经在队列里或已在途的会被忽略。
+    /// 请求一个图标。已在途、或**已经失败过**的会被忽略。
     pub fn request(&mut self, key: Key) {
+        if self.failed.contains(&key) {
+            return;
+        }
         if self.in_flight.contains(&key) {
             return;
         }
@@ -109,10 +130,21 @@ impl Loader {
     }
 
     /// 取回已完成的结果（不阻塞）。调用方负责把它们转成 D2D 位图。
+    ///
+    /// **失败的键在这里被记下并从此不再请求**（见 `failed` 的说明）：
+    /// 调用方拿到失败结果时只会"静默跳过"，它没有能力阻止下一次请求，
+    /// 所以这件事必须由本类型负责 —— 否则就是每帧重试。
     pub fn poll(&mut self) -> Vec<Loaded> {
         let mut out = Vec::new();
         while let Ok(loaded) = self.rx.try_recv() {
             self.in_flight.remove(&loaded.key);
+            if loaded.result.is_err() {
+                if self.failed.len() >= FAILED_MEMO {
+                    // 整体清空：封住内存，同时给所有失败项一次重试机会。
+                    self.failed.clear();
+                }
+                self.failed.insert(loaded.key.clone());
+            }
             out.push(loaded);
         }
         out
