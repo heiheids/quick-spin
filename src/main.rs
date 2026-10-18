@@ -1819,10 +1819,53 @@ fn selftest() -> ExitCode {
             ));
         }
 
+        // ---- 弹窗**绘制**半径：DWM 负责圆角时必须是 0 ----
+        //
+        // 这是"底部两角浅色边"的修法所依赖的规则，所以必须用**具体期望值**钉住，
+        // 而不是"看着对"。三种取值都要查，尤其第三条 —— 它防的是"无条件返回 0"
+        // 这种把规则写死的假实现。
+        let glass_on = crate::config::model::CornerStyle {
+            rounded: true,
+            radius: 16.0,
+        };
+        if glass_on.drawn_radius() != 0.0 {
+            failures.push(format!(
+                "DWM 圆角开时弹窗应画直角 0.0，实为 {}（角上会露出月牙）",
+                glass_on.drawn_radius()
+            ));
+        }
+        let flat = crate::config::model::CornerStyle {
+            rounded: false,
+            radius: 0.0,
+        };
+        if flat.drawn_radius() != 0.0 {
+            failures.push(format!(
+                "平面模式应画直角 0.0，实为 {}",
+                flat.drawn_radius()
+            ));
+        }
+        let own = crate::config::model::CornerStyle {
+            rounded: false,
+            radius: 16.0,
+        };
+        if own.drawn_radius() != 16.0 {
+            failures.push(format!(
+                "不让 DWM 圆角时应画自己的 16.0，实为 {}（规则写死成 0 了）",
+                own.drawn_radius()
+            ));
+        }
+        // 生效值上再确认一次：使用者当前若在玻璃模式，弹窗绘制半径必须是 0。
+        if cfg_style.rounded && cfg_style.drawn_radius() != 0.0 {
+            failures.push(format!(
+                "生效值 DWM 圆角为真，但弹窗绘制半径是 {}（角上会露出月牙）",
+                cfg_style.drawn_radius()
+            ));
+        }
+
         selftest_line!(
             "外框圆角   : {}",
             if failures.is_empty() {
-                "玻璃开=圆角+配置半径 / 玻璃关=直角+0.0 / 半径0是合法边界 / 取自生效值而非配置字段 —— 全部通过"
+                "玻璃开=圆角+配置半径 / 玻璃关=直角+0.0 / 半径0是合法边界 / 取自生效值而非配置字段 / **弹窗绘制半径：DWM 圆角时为 0**（含无条件返回 0 的反例） —— 全部通过"
                     .to_string()
             } else {
                 format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))

@@ -938,8 +938,9 @@ impl Handler for Popout {
                 states,
                 &self.content.items,
                 &bitmaps,
-                // 面板半径由装配层算好传来（规则见 `Appearance::corner_style`）
-                self.corners.radius,
+                // 面板**绘制**半径：DWM 负责圆角时必须画直角，否则角上会留下
+                // 一道露出桌面的月牙（推导见 `CornerStyle::drawn_radius`）
+                self.corners.drawn_radius(),
             );
 
             // ---- 选色浮层（**最后画 = 最上层**）----
