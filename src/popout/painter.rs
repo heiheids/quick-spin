@@ -270,8 +270,13 @@ impl PopoutPainter {
             // ---- 面板底 ----
             // 半径来自装配层（与主窗口同源）；平面模式下是 0，面板就是直角 ——
             // 那种情况下 DWM 的系统圆角也被一起关掉，角上不会露出桌面。
+            //
+            // **用 `panel_fill` 而不是 `panel`**：逻辑尺寸是整数，乘回缩放系数后
+            // 可能差不到半个物理像素，面板底边就停在第 N−0.5 个像素上，最后半行
+            // 没盖住、透出桌面 —— 经抗锯齿是一道极细的浅色边。`panel_fill`
+            // 右/下各外扩了 `PANEL_OVERDRAW`（推导见那里）。
             brush.SetColor(&to_d2d(scheme.panel.from));
-            ctx.FillRoundedRectangle(&rounded_i(layout.panel, panel_radius), brush);
+            ctx.FillRoundedRectangle(&rounded(layout.panel_fill, panel_radius), brush);
             // 同色系描边（方向由面板亮度决定，见 theme::finalize）
             //
             // **用 `panel_stroke` 而不是 `panel`**：描边是以路径为中心画线的，

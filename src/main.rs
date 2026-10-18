@@ -1219,23 +1219,39 @@ fn selftest() -> ExitCode {
                 failures.push(format!("{tag} 面板未覆盖客户区"));
             }
 
-            // 描边必须**完整落在客户区内**（2026-10-18 的"右下角白边"）。
+            // 描边矩形：**四边内缩必须相等**，且外沿不越出客户区。
             //
-            // D2D 的 `DrawRoundedRectangle` 以路径为中心画线，所以外沿 =
-            // 矩形外扩半个线宽。若外沿超出客户区，那半个线宽会被窗口边缘裁掉，
-            // 弧上留下浅色毛边 —— 半径相对窗口越大（小窗口 + 圆角）越明显。
+            // 元组含义按消费方 `render::painters::rounded` 来：`(left, top, right, bottom)`。
+            // 它把第 3/4 个参数直接塞进 `D2D_RECT_F.right/bottom`（`rounded_i` 才做
+            // `x+w` 的换算），所以往这个字段里写"宽/高"会**静默**变成右下角坐标。
             //
-            // 这条纯几何断言正好能钉住它，不需要真的建窗口。
+            // 这正是 2026-10-18 那次改动（`67208b4`）的错：文档写的是
+            // `(left, top, width, height)`，于是算出 `right = 宽 − 1.2`，
+            // 而正确值是 `宽 − 0.6` —— 左/上内缩 0.6、右/下内缩 1.2，
+            // **描边不对称，缺口全落在底部与右侧**（使用者报的"底部两角"）。
+            //
+            // 所以断言不能只查"没越界"（越界方向是安全的，错的那版恰好更保守、
+            // 所以能骗过旧断言）。必须查**四个内缩量彼此相等**。
             {
                 let half = popout::layout::PANEL_STROKE / 2.0;
-                let (sl, st, sw, sh) = l.panel_stroke;
+                let (sl, st, sr, sb) = l.panel_stroke;
+                let insets = [sl, st, w as f32 - sr, h as f32 - sb];
+                for (i, v) in insets.iter().enumerate() {
+                    if (v - half).abs() > 0.001 {
+                        failures.push(format!(
+                            "{tag} 描边第 {i} 边内缩 {v:.2}，应为 {half:.2}（四边必须相等，\
+                             元组是 left/top/right/bottom）"
+                        ));
+                    }
+                }
+                // 外沿（中线外扩半个线宽）不得越出客户区
                 if sl - half < -0.001
                     || st - half < -0.001
-                    || sl + sw + half > w as f32 + 0.001
-                    || st + sh + half > h as f32 + 0.001
+                    || sr + half > w as f32 + 0.001
+                    || sb + half > h as f32 + 0.001
                 {
                     failures.push(format!(
-                        "{tag} 描边外沿越出客户区（描边 {sl},{st},{sw},{sh}，半线宽 {half}）"
+                        "{tag} 描边外沿越出客户区（描边 {sl},{st},{sr},{sb}，半线宽 {half}）"
                     ));
                 }
                 // 半径也不能因内缩变成负数（那会让 D2D 行为不可预期）
@@ -1310,6 +1326,48 @@ fn selftest() -> ExitCode {
         let (x1, y1) = l.tile_at(l.columns, rh);
         if x1 != l.grid_origin.0 || y1 <= l.grid_origin.1 {
             failures.push("换行位置不对".to_string());
+        }
+
+        // ---- 面板填充必须盖住**整个物理客户区**（2026-10-18 的"底部浅色边"）----
+        //
+        // 布局尺寸是逻辑整数（`round(物理/缩放)`），绘制时再乘回缩放系数 ——
+        // 先除后乘会掉一点，面板底边停在第 N−0.5 个物理像素上，最后半行没盖住，
+        // 透出浅灰桌面（经抗锯齿就是一道极细的浅色边）。修复是让填充矩形
+        // 右/下各外扩 `PANEL_OVERDRAW`。这条断言钉住"外扩之后必定覆盖"。
+        //
+        // 用例取**本机真实的缩放系数 1.25**（AppliedDPI = 120）与真实窗口尺寸，
+        // 并钉上每一组的期望值：只断言"覆盖"会漏掉"逻辑尺寸算错"这类错。
+        {
+            let scale = 1.25_f32;
+            // 603 与 453 是 round **向下**的用例：
+            // 外扩之前 482×1.25 = 602.5 < 603、362×1.25 = 452.5 < 453。
+            for (phys, want_lw) in [(603, 482), (453, 362), (449, 359), (450, 360), (455, 364)] {
+                let (lw, _) = popout::window::logical_size(phys, phys, scale);
+                if lw != want_lw {
+                    failures.push(format!(
+                        "物理 {phys} ÷ {scale} 的逻辑尺寸应为 {want_lw}，实为 {lw}"
+                    ));
+                }
+                let fill_right = lw as f32 + popout::layout::PANEL_OVERDRAW;
+                if fill_right * scale < phys as f32 {
+                    failures.push(format!(
+                        "{phys} 物理像素：填充只到 {:.2} 物理像素，**没盖住客户区**",
+                        fill_right * scale
+                    ));
+                }
+            }
+            // 外扩量不能小于 `round` 可能掉掉的上界（严格小于 0.5）。
+            if popout::layout::PANEL_OVERDRAW < 0.5 {
+                failures.push("PANEL_OVERDRAW 小于 round 可能掉掉的上界".to_string());
+            }
+            // 真布局里的填充矩形必须真的用上了外扩（防止只改了常量、没接线）。
+            let probe = PopoutLayout::compute(453, 453, 48);
+            if probe.panel_fill.2 < 453.0 + 0.5 {
+                failures.push(format!(
+                    "布局的 panel_fill 右边界没外扩：{:.2}",
+                    probe.panel_fill.2
+                ));
+            }
         }
 
         selftest_line!(

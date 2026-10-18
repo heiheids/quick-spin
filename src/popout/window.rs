@@ -668,7 +668,13 @@ impl Popout {
 /// 三处各写一份的后果只在非 100% 缩放下才暴露，而且症状很隐蔽：
 /// 布局按物理算、绘制按 DIP 算，方格整体偏大、右下角被裁掉一截，
 /// 看起来像"布局算法错了"，其实是单位没统一。
-fn logical_size(phys_w: i32, phys_h: i32, scale: f32) -> (i32, i32) {
+///
+/// **注意 `round` 会掉半个逻辑像素**（`物理/缩放` 不是整数时），所以面板填充
+/// 不能直接用这个整数尺寸去画 —— 见 `popout::layout::PANEL_OVERDRAW`。
+/// 真正的绘制用 `PopoutLayout::panel_fill`。
+///
+/// `pub(crate)`：自检要拿它验证"填充盖住整个物理客户区"这条不变量。
+pub(crate) fn logical_size(phys_w: i32, phys_h: i32, scale: f32) -> (i32, i32) {
     if scale <= 0.0 {
         return (phys_w.max(1), phys_h.max(1));
     }
