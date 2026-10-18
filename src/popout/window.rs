@@ -42,6 +42,39 @@ struct TilePress {
     start: (i32, i32),
 }
 
+/// 弹窗的**外观输入**：由装配层算好递进来的一切"长什么样"的东西。
+///
+/// 为什么收成一个值：这几项都是外观，而且**都必须由装配层推导** ——
+/// 窗口层不读 `state.toml`、不读语言文件、也不自己推"圆角该是多少"
+/// （那条规则主窗口也在用，见架构文档 §17.9 的清单）。绑成一个值之后，
+/// 调用点一眼能看出这几项是一类；以后再加一项外观也不必动签名。
+/// 同一个模式见 `palette.rs` 的 `PaletteView`。
+#[derive(Debug, Clone)]
+pub struct AppearanceInput {
+    /// 主窗口当前那套配色。自己没设配色时用它（判据只有 `palette::resolve_scheme`）。
+    pub main_scheme: Scheme,
+    /// 自己那份基础色。**空串 = 跟随主窗口**。
+    pub base_color: String,
+    /// 选色浮层要显示的文字（来自语言文件；窗口层不认识词典）。
+    pub palette_text: PaletteText,
+    /// 窗口外框圆角：系统偏好与面板绘制半径同源（`App::corner_style`）。
+    pub corners: CornerStyle,
+}
+
+/// 弹窗的**吸附状态**输入。
+///
+/// 与 [`AppearanceInput`] 分开：这一组是"待在哪、是不是钉住"，
+/// 与"长什么样"无关。两者都是**纯搬参数**的收拢，没有任何行为变化。
+#[derive(Debug, Clone, Copy)]
+pub struct DockState {
+    /// 当前是否吸附在主窗口侧边。
+    pub docked: bool,
+    /// **期望**贴哪一侧。翻边只影响落位，不改这个意图。
+    pub dock_side: DockSide,
+    /// 是否"钉住"：主窗口收起时它留着（只管可见性）。
+    pub pinned: bool,
+}
+
 /// 一个活着的弹出子窗口。
 pub struct Popout {
     window: Window,
@@ -126,22 +159,31 @@ impl Popout {
     /// 创建一个弹出子窗口。
     ///
     /// `tab_key` 是它对应的选项卡 key，窗口自己关掉时要靠它回报装配层。
-    /// `docked` / `dock_side` 是它的初始吸附状态（第一次摆位由装配层算好、
-    /// 通过 `geometry` 传进来 —— 吸附数学只有 `dock.rs` 那一份）。
-    #[allow(clippy::too_many_arguments)]
+    /// `dock` 是它的初始吸附状态（第一次摆位由装配层算好、通过 `geometry` 传进来
+    /// —— 吸附数学只有 `dock.rs` 那一份）。
+    ///
+    /// 参数曾一度到 11 个，靠 `#[allow(clippy::too_many_arguments)]` 压着。
+    /// 现在外观与吸附状态各自收成一个值（[`AppearanceInput`] / [`DockState`]），
+    /// **只搬参数、不改行为**，那个 `allow` 也就删掉了。
     pub fn create(
         tab_key: &str,
         title: &str,
         geometry: Geometry,
-        main_scheme: Scheme,
-        base_color: String,
-        palette_text: PaletteText,
+        look: AppearanceInput,
         icon_size: i32,
-        docked: bool,
-        dock_side: DockSide,
-        pinned: bool,
-        corners: CornerStyle,
+        dock: DockState,
     ) -> Result<Self> {
+        let AppearanceInput {
+            main_scheme,
+            base_color,
+            palette_text,
+            corners,
+        } = look;
+        let DockState {
+            docked,
+            dock_side,
+            pinned,
+        } = dock;
         let window = Window::create(title, geometry, false)?;
         // 系统侧圆角必须显式设一次：Win11 对顶层窗口默认就给圆角，
         // 不设就会拿到系统默认值 —— 使用者报的"弹出小窗底部是圆角"就是这个来源

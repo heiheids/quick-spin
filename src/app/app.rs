@@ -1907,21 +1907,26 @@ impl App {
             tab_key,
             &title,
             geometry,
-            self.scheme.clone(),
-            // 自己那份配色（空串 = 跟随主窗口）与浮层文字都从装配层递进去：
-            // 窗口层不读 `state`，也不读语言文件。
-            saved.base_color.clone(),
-            crate::popout::palette::PaletteText {
-                title: self.strings.popout_palette.clone(),
-                follow_main: self.strings.popout_follow_main.clone(),
+            // 外观输入收成一个值（窗口层不读 state、不读语言文件、
+            // 也不自己推圆角规则 —— 全部由装配层算好递进去）。
+            crate::popout::window::AppearanceInput {
+                main_scheme: self.scheme.clone(),
+                // 自己那份配色（空串 = 跟随主窗口）
+                base_color: saved.base_color.clone(),
+                palette_text: crate::popout::palette::PaletteText {
+                    title: self.strings.popout_palette.clone(),
+                    follow_main: self.strings.popout_follow_main.clone(),
+                },
+                // 外框圆角：系统偏好与面板半径都取自同一处（`App::corner_style`），
+                // 所以弹窗的角与主窗口必然一致。
+                corners: self.corner_style(),
             },
             self.layout.icon_size as i32,
-            saved.docked,
-            saved.dock_side,
-            saved.pinned,
-            // 外框圆角：系统偏好与面板半径都取自同一处（`App::corner_style`），
-            // 所以弹窗的角与主窗口必然一致。
-            self.corner_style(),
+            crate::popout::window::DockState {
+                docked: saved.docked,
+                dock_side: saved.dock_side,
+                pinned: saved.pinned,
+            },
         ) {
             Ok(p) => {
                 // **必须先装箱、再 attach。顺序反了就是悬垂指针。**
