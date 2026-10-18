@@ -502,6 +502,16 @@ impl Window {
         unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
 
+    /// 句柄是否还指向一个活着的窗口。
+    ///
+    /// 用来在**读几何之前**拦一道：已销毁的窗口 `GetWindowRect` 会失败，
+    /// 矩形留在全 0，于是"读位置"变成读到 `(0,0)` —— 那是**一个合法坐标**，
+    /// 存进状态文件就成了"窗口跑到屏幕左上角"。
+    /// 主窗口那条路已经因为同一类问题加过 `x > -30000` 的判断（见 `save_state`）。
+    pub fn is_alive(&self) -> bool {
+        unsafe { IsWindow(Some(self.hwnd)).as_bool() }
+    }
+
     pub fn show(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);

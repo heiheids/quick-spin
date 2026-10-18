@@ -1574,6 +1574,12 @@ impl App {
             // 窗口已经没了：这条回报与关闭撞在一起，交给关闭那条收尾。
             return false;
         };
+        if !p.is_alive() {
+            // 已销毁但"我关了"那条回报还没被收走：这时读位置会拿到 `(0,0)`
+            //（合法坐标！），写进状态就成了"下次启动跑到屏幕左上角"。
+            // 拒绝写入，交给关闭回报去收尾。
+            return false;
+        }
         let fresh = p.persistable();
         let old = self.state.get().popout.get(key);
         let merged = crate::popout::state::PopoutWindow {
