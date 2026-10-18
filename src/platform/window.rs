@@ -713,11 +713,17 @@ impl Window {
     pub fn mark_main(&self) -> bool {
         // 闭包要显式以 `true` 结尾：赋值表达式的值是 `()`，
         // 直接写 `ctx.is_main = true` 会让 `Option<()>` 去 `unwrap_or(false)`。
-        with_ctx(self.hwnd, |ctx| {
+        let ok = with_ctx(self.hwnd, |ctx| {
             ctx.is_main = true;
             true
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+        if ok {
+            // 主窗口的存在与身份是日志里"程序有没有起来"的起点：
+            // 只有弹窗行而没有这一行，说明主窗口压根没建出来。
+            crate::diag::log(&format!("主窗口已就位 hwnd={:x}", self.hwnd.0 as usize));
+        }
+        ok
     }
 
     /// 是否已被标记为主窗口。
@@ -1152,6 +1158,22 @@ unsafe extern "system" fn wnd_proc(
             // 多窗口之前这里是无条件 `PostQuitMessage`，那时只有一个窗口，
             // 所以看不出问题。
             let is_main = with_ctx(hwnd, |ctx| ctx.is_main).unwrap_or(false);
+            // 记下这次销毁的**去向**：这是排查"程序突然没了"的第一个分岔口。
+            //
+            // 主窗口销毁 → 消息循环即将结束，`run_gui` 随后会记一行
+            // "程序正常退出"；弹窗销毁 → 循环继续、程序**不该**退出。
+            // 所以日志停在"弹窗已关闭"之后而没有任何主窗口/退出行，
+            // 才说明是崩溃。
+            crate::diag::log(&format!(
+                "窗口销毁: {}（{}）hwnd={:x}",
+                if is_main { "主窗口" } else { "弹窗" },
+                if is_main {
+                    "消息循环将结束"
+                } else {
+                    "消息循环继续"
+                },
+                hwnd.0 as usize
+            ));
             if is_main {
                 unsafe { PostQuitMessage(0) };
             }
@@ -1163,6 +1185,13 @@ unsafe extern "system" fn wnd_proc(
             // 从"活着的窗口"表里摘掉。放在这里而不是 `WM_DESTROY`：
             // `WM_DESTROY` 之后窗口还可能收到消息，绘制分派仍需要它。
             unregister_window(hwnd);
+            // 存活数是"还有几个窗口没走完销毁"的现场。它归零之后再出现
+            // 任何活动，就是不该有的东西。
+            crate::diag::log(&format!(
+                "窗口已彻底销毁 hwnd={:x}（存活 {}）",
+                hwnd.0 as usize,
+                live_window_count()
+            ));
             let ptr = ctx_ptr(hwnd);
             if !ptr.is_null() {
                 unsafe {

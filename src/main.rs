@@ -34,6 +34,14 @@ use config::SchemeBook;
 use i18n::I18n;
 
 fn main() -> ExitCode {
+    // **最早装 panic 钩子。**
+    //
+    // 放在 `prepare_console` 之前：从这里往后每一行都可能出问题（参数、控制台、
+    // 单实例、配置），而崩溃一旦发生，没有钩子就什么都不留 —— 这正是
+    // 2026-10-18 那次崩溃查不到任何记录的原因（见 `diag::install_panic_hook`）。
+    // 命令行模式（`--selftest` 等）走的也是这个 `main`，一并覆盖。
+    diag::install_panic_hook();
+
     let mut args = std::env::args().skip(1);
     let first = args.next().unwrap_or_default();
 
@@ -160,7 +168,12 @@ fn run_gui() -> ExitCode {
             if wanted {
                 match platform::single_instance::acquire_or_activate() {
                     // 已有实例，已经把它叫到前面，本次启动到此为止
-                    Ok(false) => return ExitCode::SUCCESS,
+                    Ok(false) => {
+                        // 这也是一种"正常结束"，而且**不是崩溃**：记一行，
+                        // 免得下次看到日志在这里断掉、误判成"启动时就崩了"。
+                        diag::log("已有实例在运行，已把它叫到前面，本次启动结束");
+                        return ExitCode::SUCCESS;
+                    }
                     Ok(true) => {}
                     // 单实例机制本身失败时**照常启动**：宁可多开一个窗口，
                     // 也不要因为一个保护性功能出错而让程序打不开。
@@ -173,8 +186,17 @@ fn run_gui() -> ExitCode {
     }
 
     match app::App::new().and_then(|a| a.run()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // **这一行是"正常退出"的凭据。**
+            //
+            // 排查"程序突然没了"时先看日志最后一行：
+            // 有它 = 消息循环正常结束；没有 = 崩了（或被强杀）。
+            // 配合 `WM_DESTROY` 那行（主窗口销毁 / 弹窗销毁）就能定位到哪一步。
+            diag::log("程序正常退出（消息循环结束）");
+            ExitCode::SUCCESS
+        }
         Err(e) => {
+            diag::log(&format!("启动失败，程序退出: {e}"));
             eprintln!("启动失败: {e}");
             ExitCode::FAILURE
         }
