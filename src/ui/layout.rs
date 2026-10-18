@@ -116,6 +116,10 @@ const SETTINGS_MARGIN: i32 = 12;
 const SETTINGS_CLOSE: i32 = 30;
 /// 设置项距面板左右边缘
 const SETTINGS_ROW_INSET: i32 = 14;
+/// 「使用说明」按钮的尺寸与贴边距离（右下角）
+const SETTINGS_HELP_W: i32 = 96;
+const SETTINGS_HELP_H: i32 = 30;
+const SETTINGS_HELP_MARGIN: i32 = 16;
 /// 第一个设置项距面板顶部的距离（让出标题行）
 const SETTINGS_ROWS_TOP: i32 = 58;
 /// 设置项行高
@@ -235,6 +239,11 @@ pub struct Layout {
     pub settings_panel: RectI,
     /// 设置面板的关闭按钮
     pub settings_close: RectI,
+    /// 设置面板右下角的「使用说明」按钮。
+    ///
+    /// 单独一个按钮、而不是并进设置项列表：它不改变任何设置，只是打开一份
+    /// 文档。和开关混在一起会让人以为点它会改什么。
+    pub settings_help: RectI,
     /// 每个设置项的行矩形，顺序与界面上的项一致
     /// 设置面板里的基础色色块，按行铺开。
     pub settings_swatches: Vec<RectI>,
@@ -388,6 +397,13 @@ impl Layout {
             SETTINGS_CLOSE,
             SETTINGS_CLOSE,
         );
+        // 右下角的「使用说明」按钮。贴在面板内沿，留一圈和别处一致的边距。
+        let settings_help = RectI::new(
+            settings_panel.x + settings_panel.w - SETTINGS_HELP_W - SETTINGS_HELP_MARGIN,
+            settings_panel.y + settings_panel.h - SETTINGS_HELP_H - SETTINGS_HELP_MARGIN,
+            SETTINGS_HELP_W,
+            SETTINGS_HELP_H,
+        );
         let row_width = settings_panel.w - SETTINGS_ROW_INSET * 2;
         let mut settings_rows = Vec::with_capacity(input.settings_rows);
         for i in 0..input.settings_rows {
@@ -460,6 +476,7 @@ impl Layout {
             tile_gap: input.tile_gap,
             settings_panel,
             settings_close,
+            settings_help,
             settings_swatches,
             settings_rows,
         }

@@ -49,6 +49,8 @@ struct Strings {
     /// 色板区的标题
     setting_theme_custom: String,
     setting_hotkey: String,
+    /// 设置面板右下角「使用说明」按钮的文字
+    settings_help: String,
 }
 
 /// 只扫程序自己的快捷方式目录。
@@ -200,6 +202,16 @@ impl Marquee {
 
 /// 判定"这是一次框选"所需的最小拖动距离（逻辑像素）。与方格拖拽同一量级。
 const MARQUEE_MIN: i32 = 3;
+
+/// 使用说明的文件名。落在**程序同目录**（便携布局）。
+const HELP_FILE: &str = "使用说明.txt";
+
+/// 内嵌的使用说明正文。
+///
+/// **内嵌而不是"随程序放一个文本文件"**：程序只有单个 exe，
+/// 分发时不必额外记事别带文档；首次点「使用说明」时自动写到同目录。
+/// 想改内容改 `assets/使用说明.txt` 即可，编译时会被打包进去。
+const HELP_TEXT: &str = include_str!("../../assets/使用说明.txt");
 
 /// 帧耗时统计。
 ///
@@ -382,6 +394,7 @@ impl Strings {
             setting_autostart: i18n.t("settings.autostart").to_string(),
             setting_theme_custom: i18n.t("settings.theme_custom").to_string(),
             setting_hotkey: i18n.t("settings.hotkey").to_string(),
+            settings_help: i18n.t("settings.help").to_string(),
         }
     }
 }
@@ -455,6 +468,8 @@ pub struct App {
     hover_setting_row: Option<usize>,
     /// 鼠标悬停在设置面板的关闭按钮
     hover_settings_close: bool,
+    /// 鼠标是否停在设置面板右下角的「使用说明」按钮上
+    hover_settings_help: bool,
 
     /// 右键菜单。`Some` 表示菜单正展开。
     ///
@@ -747,6 +762,7 @@ impl App {
             settings_open: false,
             hover_setting_row: None,
             hover_settings_close: false,
+            hover_settings_help: false,
             menu: None,
             menu_hover: None,
             editing: None,
@@ -1351,6 +1367,47 @@ impl App {
         // 可见集合少了这些条目，必须重算（顺带清空选中集）。
         self.refresh_view();
         true
+    }
+
+    /// 把窗口几何与界面状态写回 `state.toml`。
+    /// 说明文档的文件名。放在**程序同目录**（便携布局，见 `paths::data_dir`）。
+    fn help_doc_path() -> Option<std::path::PathBuf> {
+        crate::paths::data_dir().ok().map(|d| d.join(HELP_FILE))
+    }
+
+    /// 确保同目录下有使用说明文件，返回它的路径。
+    ///
+    /// **只在该文件不存在时写入**：用户可能自己在上面做批注，
+    /// 每次启动都覆盖会把批注冲掉。想恢复成内置版本，删掉它再点一次按钮即可。
+    ///
+    /// 写的是 UTF-8 **带 BOM**：不带 BOM 的话，部分编辑器（含 Windows 上一些
+    /// 老牌记事本实现）会按系统 ANSI 代码页解读，中文直接变乱码 ——
+    /// 本工程的备份脚本就踩过同一个坑。
+    fn ensure_help_doc() -> Option<std::path::PathBuf> {
+        let path = Self::help_doc_path()?;
+        if !path.exists() {
+            let mut bytes = Vec::with_capacity(HELP_TEXT.len() + 3);
+            bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+            bytes.extend_from_slice(HELP_TEXT.as_bytes());
+            if let Err(e) = std::fs::write(&path, &bytes) {
+                // 写不进去不算致命：下面照样打开（或让系统报"找不到文件"）
+                eprintln!("写入使用说明失败: {e}");
+            }
+        }
+        Some(path)
+    }
+
+    /// 打开使用说明（没有就先生成一份）。
+    fn open_help_doc(&mut self) {
+        let Some(path) = Self::ensure_help_doc() else {
+            diag("open_help_doc: 取数据目录失败");
+            return;
+        };
+        diag(&format!("open_help_doc 开始: {}", path.display()));
+        match crate::shell::launch::open(&path) {
+            Ok(()) => diag("open_help_doc: shell 已返回成功"),
+            Err(e) => diag(&format!("open_help_doc: 打开失败 {e}")),
+        }
     }
 
     /// 把窗口几何与界面状态写回 `state.toml`。
@@ -2271,6 +2328,8 @@ impl App {
                     &self.strings.setting_theme_custom,
                     self.hover_setting_row,
                     self.hover_settings_close,
+                    &self.strings.settings_help,
+                    self.hover_settings_help,
                 )?;
             }
         }
@@ -3337,6 +3396,12 @@ impl App {
                 self.settings_open = false;
                 return true;
             }
+            // 右下角「使用说明」：打开同目录下的说明文本。
+            // **不关闭面板** —— 用户看完文档多半还要接着调设置。
+            if self.layout.settings_help.contains(lx, ly) {
+                self.open_help_doc();
+                return true;
+            }
             if let Some(row) = self
                 .layout
                 .settings_rows
@@ -3864,9 +3929,13 @@ impl App {
                 .iter()
                 .position(|r| r.contains(lx, ly));
             let close = self.layout.settings_close.contains(lx, ly);
-            let changed = row != self.hover_setting_row || close != self.hover_settings_close;
+            let help = self.layout.settings_help.contains(lx, ly);
+            let changed = row != self.hover_setting_row
+                || close != self.hover_settings_close
+                || help != self.hover_settings_help;
             self.hover_setting_row = row;
             self.hover_settings_close = close;
+            self.hover_settings_help = help;
             return changed;
         }
 
@@ -3973,13 +4042,15 @@ impl Handler for App {
                     || self.hover_tile.is_some()
                     || self.hover_settings
                     || self.hover_setting_row.is_some()
-                    || self.hover_settings_close;
+                    || self.hover_settings_close
+                    || self.hover_settings_help;
                 self.hover_caption = None;
                 self.hover_tab = None;
                 self.hover_tile = None;
                 self.hover_settings = false;
                 self.hover_setting_row = None;
                 self.hover_settings_close = false;
+                self.hover_settings_help = false;
                 changed
             }
             Event::Destroyed => {

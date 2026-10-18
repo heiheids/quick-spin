@@ -77,6 +77,9 @@ impl SettingsPainter {
         palette_title: &str,
         hover_row: Option<usize>,
         hover_close: bool,
+        // 右下角「使用说明」按钮的文字与悬停态。
+        help_label: &str,
+        hover_help: bool,
     ) -> Result<()> {
         let Some(brush) = &self.brush else {
             return Ok(());
@@ -260,6 +263,25 @@ impl SettingsPainter {
             }
         }
 
+        // ---- 右下角「使用说明」按钮 ----
+        //
+        // 不并进上面的设置项列表：它不改变任何设置，只是打开一份文档；
+        // 混在开关里会让人以为点它会改什么。放在右下角是刻意的 ——
+        // 那块地方本来就空着，也不挡色板。
+        if let Some(brush) = &self.brush {
+            let help = layout.settings_help;
+            let help_frame = rounded_i(help, 8.0);
+            // SAFETY: COM 调用；结构体都是本函数栈上的局部量。
+            unsafe {
+                if hover_help {
+                    brush.SetColor(&to_d2d(scheme.tile_hover));
+                    ctx.FillRoundedRectangle(&help_frame, brush);
+                }
+                brush.SetColor(&to_d2d(scheme.tab_active_border));
+                ctx.DrawRoundedRectangle(&help_frame, brush, 1.2, no_style);
+            }
+        }
+
         // ---- 文字（走文本引擎，需要 &mut）----
         // 面板标题
         let title_rect = (
@@ -269,6 +291,19 @@ impl SettingsPainter {
             30.0,
         );
         text.draw(ctx, title, Role::Setting, title_rect, scheme.text_primary)?;
+
+        // 「使用说明」按钮上的字。
+        //
+        // 用 `Role::Tab` 而不是 `Role::Setting`：前者的水平与垂直对齐都是
+        // **居中**（见 `text.rs` 的 `alignment()`），按钮上的字要的是居中；
+        // 后者是左对齐，在这个小方框里会贴在左边、显得偏。
+        text.draw(
+            ctx,
+            help_label,
+            Role::Tab,
+            layout.settings_help.as_f32(),
+            scheme.text_primary,
+        )?;
 
         // 每个设置项的标签
         for (i, row) in layout.settings_rows.iter().enumerate() {
