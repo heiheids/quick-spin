@@ -1,10 +1,18 @@
-//! Quick spin程序入口。
+//! Quick spin 程序入口。
 //!
-//! **当前进度**：配置层（多配色 + 多语言）、运行时状态层、快捷方式解析/扫描/启动
-//! 三条链路已打通，可用 `--diagnose` 自检。窗口层与 Direct2D/DirectComposition
-//! 渲染层待实现，所以现在还没有界面。
-//!
+//! 界面、渲染、快捷方式三条链路均已实现，用 `--selftest` / `--diagnose` 自检。
 //! 框架设计见 `docs/ARCHITECTURE.md`。
+//!
+//! ## 为什么编成 GUI 子系统
+//!
+//! `windows_subsystem = "windows"` 让双击 exe **不再弹出控制台黑框**。
+//! 本程序是常驻托盘、可"启动后自动收起"的启动器，跟着一个黑框是不能接受的。
+//!
+//! 代价是进程默认**没有可用的标准句柄**，所以两种模式要分别接上
+//!（见 [`prepare_console`]）：命令行模式接控制台，图形界面模式接 `NUL`。
+
+// 无参数启动界面时不要控制台窗口；命令行模式的输出由 `prepare_console` 负责。
+#![windows_subsystem = "windows"]
 
 mod app;
 mod config;
@@ -25,7 +33,13 @@ use i18n::I18n;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    match args.next().unwrap_or_default().as_str() {
+    let first = args.next().unwrap_or_default();
+
+    // 有子命令 = 命令行模式（要能看到输出）；无参数或 `--gui` = 图形界面模式
+    //（要**没有**控制台窗口）。判据与下面的分派保持一致。
+    prepare_console(!first.is_empty() && first != "--gui");
+
+    match first.as_str() {
         // 无参数即启动界面 —— 双击 exe 的预期行为
         "" | "--gui" => run_gui(),
         "--selftest" => selftest(),
@@ -36,6 +50,84 @@ fn main() -> ExitCode {
             usage();
             ExitCode::SUCCESS
         }
+    }
+}
+
+/// 按运行模式把标准句柄接到「控制台」或 `NUL`。
+///
+/// 本程序编成 GUI 子系统（理由见文件头），**双击时不会自动获得控制台**，
+/// 标准句柄是空的。于是两种模式要分别处理：
+///
+/// * **命令行模式**：先挂到父进程的控制台 —— 从 cmd / PowerShell 启动时，
+///   输出就落回那个窗口，不会另开一个新的；父进程没有控制台（双击、或被别的
+///   GUI 程序拉起）才自己 `AllocConsole` 开一个，否则用户会以为程序没反应。
+/// * **图形界面模式**：接到 `NUL`。**这一条不能省** —— Rust 的 `print_to`
+///   在写入失败时会 `panic!`，而本工程是 `panic = "abort"`，于是一句
+///   "写不出去的日志"会把整个界面**直接终止**，且不留任何痕迹。
+///   接到 `NUL` 之后写入永远成功、内容丢弃，这类崩溃就不可能发生。
+///
+/// 已经拿到有效标准输出时**什么都不做**：那说明输出被重定向到了管道或文件
+///（`quick-spin --diagnose | findstr ...`），覆盖成 `CONOUT$` 会把管道打断。
+fn prepare_console(cli: bool) {
+    use windows::Win32::System::Console::{
+        AllocConsole, AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
+    };
+
+    // SAFETY: 都是无参/常量入参的控制台 API；只影响本进程的标准句柄。
+    unsafe {
+        if GetStdHandle(STD_OUTPUT_HANDLE).is_ok() {
+            return;
+        }
+        if cli {
+            if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+                let _ = AllocConsole();
+            }
+            bind_std_handles("CONOUT$", "CONIN$");
+        } else {
+            bind_std_handles("NUL", "NUL");
+        }
+    }
+}
+
+/// 打开设备名，把标准输出/错误/输入指过去。
+///
+/// 用 `std::fs` 而不是 `CreateFileW`：设备名（`CONOUT$` / `NUL` / `CONIN$`）
+/// 走的是同一条打开路径，省掉一次裸句柄拼装。
+///
+/// 句柄**故意泄漏**（`mem::forget`）：`File` 一 drop 就把句柄关掉，
+/// 标准输出随即变成野句柄，之后每一次 `println!` 都会失败。
+/// 泄漏的是三个进程级句柄，进程退出时由系统回收。
+fn bind_std_handles(out_dev: &str, in_dev: &str) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    let open = |name: &str| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name)
+            .ok()
+    };
+
+    if let Some(f) = open(out_dev) {
+        let handle = HANDLE(f.as_raw_handle());
+        // SAFETY: handle 来自刚打开、且被 forget 掉（不会关闭）的文件。
+        unsafe {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, handle);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, handle);
+        }
+        std::mem::forget(f);
+    }
+    if let Some(f) = open(in_dev) {
+        let handle = HANDLE(f.as_raw_handle());
+        // SAFETY: 同上。
+        unsafe {
+            let _ = SetStdHandle(STD_INPUT_HANDLE, handle);
+        }
+        std::mem::forget(f);
     }
 }
 

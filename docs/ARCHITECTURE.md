@@ -489,3 +489,66 @@ SwapChain 与一个 DComp Target，增量约 1~2 MB。
   （`AppState::entries` 是 `HashMap`，迭代顺序每个进程都不一样）。
   内容不变，只有字节序会变。
 
+---
+
+## 14. 可执行文件是 GUI 子系统（2026-10-18）
+
+### 14.1 问题与结论
+
+双击 exe 会弹出控制台黑框。根因不是配置，是 **PE 子系统**：
+`Subsystem = 3`（`WINDOWS_CUI`）—— 源码里从来就没有 `windows_subsystem` 属性，
+所以它一直是控制台程序，双击必然得到一个控制台。
+
+修法是一行：`#![windows_subsystem = "windows"]`（变成 `Subsystem = 2`）。
+
+对**这个程序**而言这不是可选项：它常驻托盘、支持"启动后自动收起"，
+跟着一个关不掉的黑框与产品定位直接冲突。
+
+### 14.2 代价与处理
+
+GUI 子系统的代价是进程默认**没有可用的标准句柄**，`println!` 无处可写。
+两种模式分别接上（见 `main.rs` 的 `prepare_console`）：
+
+| 模式 | 标准句柄接到 |
+|---|---|
+| 命令行（`--selftest` / `--diagnose` / `--open` / `--help`） | 父进程的控制台；父进程没有才 `AllocConsole` |
+| 图形界面（无参数 / `--gui`） | `NUL` |
+
+三条必须同时做到，少一条就出问题：
+
+1. **已经拿到有效标准输出时什么都不做。** 那说明输出被重定向到了管道或文件
+   （`quick-spin --diagnose | findstr ...`），覆盖成 `CONOUT$` 会把管道打断。
+   判据是 `GetStdHandle(STD_OUTPUT_HANDLE).is_ok()`。
+2. **图形界面模式必须把 stdout/stderr 接到 `NUL`。** 这一条看着像洁癖，其实是
+   稳定性要求：Rust 的 `print_to` 在写入失败时会 `panic!`，而本工程
+   `panic = "abort"` —— 一句"写不出去的日志"会把整个界面**直接终止**，
+   而且不留任何痕迹。接到 `NUL` 后写入永远成功。
+3. **句柄要故意泄漏（`mem::forget`）。** `File` 一 drop 就关掉句柄，
+   标准输出随即变成野句柄，之后每一次 `println!` 都会失败。
+
+第 1 条依赖的语义已核实：windows-rs 的 `HANDLE::is_invalid()` 把 **`-1` 和 `NULL`
+都判为无效**，所以双击启动（stdout 为 NULL）时 `GetStdHandle` 返回 `Err`，
+一定会走到绑定那一支：
+
+```rust
+pub fn is_invalid(&self) -> bool { self.0 == -1 as _ || self.0 == 0 as _ }
+```
+
+### 14.3 已知取舍：shell 不会等待 GUI 程序
+
+`cmd` / PowerShell 对 GUI 子系统的程序**不等待**，所以直接敲
+`.\quick-spin.exe --diagnose` 会立刻回到提示符，输出在提示符之后才刷出来，
+`$LASTEXITCODE` 也拿不到。要等待、要退出码、要管道，就用：
+
+```powershell
+cargo run --release -- --diagnose                  # cargo 会等
+cmd /c "target\release\quick-spin.exe --selftest"  # cmd 会等
+Start-Process -Wait -PassThru ...                  # 显式等待，可读 ExitCode
+```
+
+这是子系统带来的、**在进程内无法消除**的后果（等不等由父 shell 在启动时决定，
+子进程改不了）。要同时满足"双击无黑框"和"命令行体验完整"，标准做法是拆成两个
+可执行文件（GUI 的 `quick-spin.exe` + 控制台的 `quick-spin-cli.exe`），
+但需要先把工程拆出 lib。当前三条命令行用途（自检、诊断、按名启动）都够用，
+所以先不拆。
+
