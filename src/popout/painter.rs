@@ -13,6 +13,16 @@
 
 use crate::platform::hittest::RectI;
 use crate::popout::layout::TitleButton;
+use crate::popout::layout::{PopoutLayout, TITLE_BUTTONS};
+
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::*;
+
+use crate::config::theme::Scheme;
+use crate::error::{Result, Win32Ext};
+use crate::render::{Role, TextEngine};
+
+use crate::render::painters::{rounded_i, to_d2d};
 
 /// 一个绘制原语。坐标是**窗口内的逻辑像素**（不是相对按钮的），
 /// 这样绘制层可以直接用，测试层也可以直接判断它在不在按钮里。
@@ -164,4 +174,140 @@ pub fn clover_colors() -> [(u8, u8, u8); 4] {
         (0x4C, 0xAF, 0x50), // 绿
         (0x42, 0x8B, 0xF5), // 蓝
     ]
+}
+
+/// 弹出子窗口的绘制器。
+///
+/// 与其他绘制器同样的形状：一把白色笔刷，靠 `SetColor` 改色复用。
+/// 每个窗口一份（弹出窗口自给自足，见 `mod.rs` 的选择 A）。
+///
+/// **临时的 `allow(dead_code)`**：绘制器已就绪，但构造它的 `window.rs`
+/// 还没写（下一步）。等 `window.rs` 落地后请删掉下面这行。
+#[allow(dead_code)]
+pub struct PopoutPainter {
+    brush: Option<ID2D1SolidColorBrush>,
+}
+
+impl PopoutPainter {
+    pub fn new() -> Self {
+        Self { brush: None }
+    }
+
+    /// 建/复用自己的笔刷。**每次绘制都要调**：设备丢失重建后旧的笔刷失效。
+    pub fn ensure(&mut self, ctx: &ID2D1DeviceContext) -> Result<()> {
+        if self.brush.is_none() {
+            let white = D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            };
+            // SAFETY: COM 调用；white 是栈上局部量。
+            self.brush = Some(
+                unsafe { ctx.CreateSolidColorBrush(&white, None) }.ctx("CreateSolidColorBrush")?,
+            );
+        }
+        Ok(())
+    }
+
+    /// 画一帧：面板底 + 标题栏 + 四个图标 + 标题文字。
+    ///
+    /// 图标网格（内容区）本版先不画 —— 条目快照与图标管线是下一步。
+    pub fn draw(
+        &self,
+        ctx: &ID2D1DeviceContext,
+        text: &mut TextEngine,
+        layout: &PopoutLayout,
+        scheme: &Scheme,
+        title: &str,
+        hover: Option<TitleButton>,
+    ) -> Result<()> {
+        let Some(brush) = &self.brush else {
+            return Ok(());
+        };
+
+        // SAFETY: COM 调用；所有结构体都是本函数栈上的局部量。
+        unsafe {
+            // ---- 面板底 ----
+            brush.SetColor(&to_d2d(scheme.panel.from));
+            ctx.FillRoundedRectangle(&rounded_i(layout.panel, 10.0), brush);
+            // 同色系描边（方向由面板亮度决定，见 theme::finalize）
+            brush.SetColor(&to_d2d(scheme.border.from));
+            ctx.DrawRoundedRectangle(&rounded_i(layout.panel, 10.0), brush, 1.2, None);
+
+            // ---- 标题栏底色：取渐变的另一端，让它读起来是"一条栏" ----
+            brush.SetColor(&to_d2d(scheme.panel.to));
+            ctx.FillRectangle(&rect_to_d2d(layout.title_bar), brush);
+
+            // ---- 四个图标 ----
+            let colors = clover_colors();
+            for (i, btn) in TITLE_BUTTONS.iter().enumerate() {
+                let rect = layout.buttons[i];
+
+                // 悬停底色：与主窗口按钮一致的观感
+                if hover == Some(*btn) {
+                    brush.SetColor(&to_d2d(scheme.tile_hover));
+                    ctx.FillRoundedRectangle(&rounded_i(rect, 6.0), brush);
+                }
+
+                let shapes = glyph(*btn, rect, false);
+                for (k, s) in shapes.iter().enumerate() {
+                    // 四叶草的四个圆各上一色；其余图标统一用文字色。
+                    // 直接构造 `D2D1_COLOR_F` 而不是先做一个 `Color`：
+                    // 颜色空间转换（sRGB / 预乘）在这一层没有意义，
+                    // 而 `Color` 的构造函数是给配置解析用的。
+                    if *btn == TitleButton::Color {
+                        let (r, g, b) = colors[k.min(colors.len() - 1)];
+                        brush.SetColor(&D2D1_COLOR_F {
+                            r: r as f32 / 255.0,
+                            g: g as f32 / 255.0,
+                            b: b as f32 / 255.0,
+                            a: 1.0,
+                        });
+                    } else {
+                        brush.SetColor(&to_d2d(scheme.text_primary));
+                    }
+                    match *s {
+                        Glyph::Disc { c, r } => {
+                            ctx.FillEllipse(&ellipse(c, r), brush);
+                        }
+                        Glyph::Line { a, b, width } => {
+                            ctx.DrawLine(point(a), point(b), brush, width, None);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 标题文字（走文本引擎，需要 &mut）----
+        text.draw(
+            ctx,
+            title,
+            Role::Tab,
+            layout.title_text.as_f32(),
+            scheme.text_primary,
+        )?;
+        Ok(())
+    }
+}
+
+fn point(p: (f32, f32)) -> windows_numerics::Vector2 {
+    windows_numerics::Vector2 { X: p.0, Y: p.1 }
+}
+
+fn ellipse(c: (f32, f32), r: f32) -> D2D1_ELLIPSE {
+    D2D1_ELLIPSE {
+        point: point(c),
+        radiusX: r,
+        radiusY: r,
+    }
+}
+
+fn rect_to_d2d(r: RectI) -> windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
+    windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F {
+        left: r.x as f32,
+        top: r.y as f32,
+        right: (r.x + r.w) as f32,
+        bottom: (r.y + r.h) as f32,
+    }
 }
