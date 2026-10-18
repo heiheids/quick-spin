@@ -14,6 +14,7 @@
 //! | `painter.rs` | 绘制：标题栏（4 个按钮）+ 图标网格 |
 //! | `icons.rs` | 内容快照 + 这个窗口自己的图标管线（加载线程与位图缓存） |
 //! | `window.rs` | 窗口行为：吸附跟随 / 脱离拖动 / 钉桌面 / 就地改名 |
+//! | `report.rs` | 回报通道：弹窗自己关了时要让装配层知道（否则菜单文案是错的） |
 //!
 //! 为什么布局不复用主窗口那份：主窗口的 `Layout` 里耦合了侧栏、滚动、搜索、
 //! 设置面板这些弹出窗口根本没有的东西。硬塞进去会让那份布局变成"两个窗口
@@ -35,6 +36,7 @@
 pub mod icons;
 pub mod layout;
 pub mod painter;
+pub mod report;
 pub mod state;
 pub mod window;
 

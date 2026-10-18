@@ -854,6 +854,88 @@ fn selftest() -> ExitCode {
         );
     }
 
+    // 弹窗与主窗口的显示名必须走**同一条规则**（别名优先）。
+    //
+    // 这条规则一度在两处各写一份：主窗口绘制查了 `alias`，弹窗推送直接用
+    // `shortcut.name` —— 表现是"在主窗口改了名，弹窗里连**关掉重开**都不变"
+    //（推的内容本身就是旧的，跟同步机制无关）。现在规则只有一处
+    //（`model::library::display_name`），这里把它的三条语义钉住。
+    {
+        let mut failures: Vec<String> = Vec::new();
+        let shortcut = crate::shell::lnk::Shortcut {
+            lnk_path: std::path::PathBuf::from(r"E:\tmp\shortcuts\记事本.lnk"),
+            origin: crate::shell::lnk::Origin::Extra,
+            name: "记事本".to_string(),
+            target: std::path::PathBuf::from(r"C:\Windows\notepad.exe"),
+            args: String::new(),
+            work_dir: std::path::PathBuf::new(),
+            description: String::new(),
+            shell_name: None,
+        };
+        let key = crate::model::library::path_key(&shortcut);
+
+        // 1. 没有覆盖记录 → 回退原名
+        let none = std::collections::BTreeMap::new();
+        if crate::model::library::display_name(&shortcut, &none) != "记事本" {
+            failures.push("没有别名时没有回退到原名".to_string());
+        }
+
+        // 2. 有别名 → 用别名（这就是"重命名"）
+        let mut overrides = std::collections::BTreeMap::new();
+        let mut ov = crate::state::EntryOverride::default();
+        ov.alias = Some("我的记事本".to_string());
+        overrides.insert(key.clone(), ov.clone());
+        if crate::model::library::display_name(&shortcut, &overrides) != "我的记事本" {
+            failures.push("有别名时没有用别名".to_string());
+        }
+
+        // 3. 别名被清空（"空文本等于清除别名"）→ 回退原名
+        ov.alias = None;
+        overrides.insert(key, ov);
+        if crate::model::library::display_name(&shortcut, &overrides) != "记事本" {
+            failures.push("别名清空后没有回退到原名".to_string());
+        }
+
+        println!(
+            "显示名规则 : {}",
+            if failures.is_empty() {
+                "别名优先 / 无别名回退原名 / 别名清空回退原名 —— 全部通过".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // 弹窗的关闭回报通道。
+    //
+    // 关窗有两条路（主窗口菜单 / 弹窗自己的 ✕），只有后者窗口层才知道；
+    // 装配层靠这个通道收尾。这里钉住两条语义：**能认出是哪一个**（存 key）
+    // 与**取走即清空**（否则同一次关闭会被重复收尾，第二次会把已经关掉的
+    // 窗口再"关"一遍，或者把刚重开的那个误删）。
+    {
+        let mut failures: Vec<String> = Vec::new();
+        crate::popout::report::report_closed("tab2");
+        crate::popout::report::report_closed("tab3");
+        let mut got = crate::popout::report::take_closed();
+        got.sort();
+        let want = vec!["tab2".to_string(), "tab3".to_string()];
+        if got != want {
+            failures.push(format!("回报内容不对: {got:?}"));
+        }
+        if !crate::popout::report::take_closed().is_empty() {
+            failures.push("取走之后又取到同一批回报（会重复收尾）".to_string());
+        }
+
+        println!(
+            "弹窗关闭回报: {}",
+            if failures.is_empty() {
+                "按选项卡 key 回报 / 取走即清空 —— 全部通过".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
     println!(
         "后台扫描   : 已就绪，共 {} 条；选项卡「{}」显示 {} 条",
         app.scanned_total(),

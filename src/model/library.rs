@@ -117,3 +117,22 @@ impl Library {
 pub fn path_key(shortcut: &Shortcut) -> String {
     shortcut.lnk_path.to_string_lossy().into_owned()
 }
+
+/// 条目的**显示名**：覆盖表里的别名（"重命名"的结果）优先，没有才用扫描到的原名。
+///
+/// 抽成函数的原因和 [`path_key`] 一样，但代价更直接：这条规则一度在
+/// **主窗口绘制**里内联着，而弹出子窗口的推送另写了一份 —— 它用的是
+/// `shortcut.name`（原名），于是"重命名"在主窗口生效、在弹窗里永远不生效，
+/// 连关掉重开都不变（因为推送的内容本身就是旧名字，跟同步机制无关）。
+///
+/// 两处各写一份的规则迟早会漂移，而漂移的表现是"同一个条目在两个窗口里
+/// 叫两个名字"这种没人会想到去查的差异。
+pub fn display_name(
+    shortcut: &Shortcut,
+    overrides: &BTreeMap<String, EntryOverride>,
+) -> String {
+    overrides
+        .get(&path_key(shortcut))
+        .and_then(|o| o.alias.clone())
+        .unwrap_or_else(|| shortcut.name.clone())
+}

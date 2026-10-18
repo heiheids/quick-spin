@@ -1479,6 +1479,66 @@ impl App {
         self.window.close();
     }
 
+    /// 收下"某个弹出窗口自己关了"的回报，并替它收尾。
+    ///
+    /// ## 为什么必须有这一步
+    ///
+    /// 关闭有两条路，只有一条能回到这里：主窗口菜单的「关闭子窗口」是本层发起的，
+    /// 而弹窗**自己右上角的 ✕** 只有窗口层知道。不靠回报的话，
+    /// `self.popouts` 里会留着一个已经死掉的窗口，于是右键菜单仍然显示
+    /// 「关闭子窗口」（点下去毫无反应），`state` 里的 `open` 也还是 `true`
+    /// —— 下次启动会把一个用户已经关掉的窗口恢复出来。
+    ///
+    /// ## 调用时机（两处，都不是每帧）
+    ///
+    /// * `on_event` 开头：右键菜单的文案是按 `self.popouts` 生成的，
+    ///   必须在这一轮事件**之前**把表修正，否则用户看到的还是"关闭子窗口"；
+    /// * `on_destroyed` 里存盘之前：保证落盘的状态是真相，
+    ///   不依赖用户是否碰过主窗口。
+    ///
+    /// 这里刻意**不做**每帧存活探测（`IsWindow`）：那是"每帧 N 次 syscall"，
+    /// 而且把"谁关了"变成轮询推断。回报是事件驱动的，只在真的关窗时写一次。
+    fn adopt_closed_popouts(&mut self) {
+        let closed = crate::popout::report::take_closed();
+        if closed.is_empty() {
+            return;
+        }
+
+        let mut changed = false;
+        for key in closed {
+            // 表里摘掉。**这里才是释放 `Box<Popout>` 的地方**：
+            // 窗口已经销毁（回报就是从销毁流程里发出来的），
+            // 而 `Box` 一直活到这一刻，所以窗口过程用到的裸指针始终有效。
+            if self.popouts.remove(&key).is_some() {
+                diag(&format!("弹出子窗口已关闭: {key}"));
+                changed = true;
+            }
+            // 记录里的 `open` 单独修：窗口没了但记录可能还在
+            //（重复回报、或表里本来就没有）。状态比表更"长寿"。
+            let was_open = self
+                .state
+                .get()
+                .popout
+                .windows
+                .get(&key)
+                .is_some_and(|w| w.open);
+            if was_open {
+                if let Some(w) = self.state.get_mut().popout.windows.get_mut(&key) {
+                    w.open = false;
+                }
+                changed = true;
+            }
+        }
+
+        if changed {
+            if let Err(e) = self.state.save() {
+                eprintln!("保存弹出窗口开关状态失败: {e}");
+            }
+            // 菜单文案与侧栏标记都可能跟着变，让主窗口重画一帧。
+            self.window.request_redraw();
+        }
+    }
+
     /// 把各选项卡的**当前可见条目**推给对应的弹出子窗口。
     ///
     /// ## 为什么是"推"而不是"共享状态"
@@ -1530,7 +1590,16 @@ impl App {
                         .filter_map(|i| {
                             let shortcut = self.library.get(i)?;
                             Some(Item {
-                                name: shortcut.name.clone(),
+                                // **显示名走与主窗口同一个函数**（别名优先）。
+                                //
+                                // 这里曾经直接用 `shortcut.name`（扫描到的原名），
+                                // 而"重命名"改的是覆盖表里的 `alias` —— 于是弹窗
+                                // 从来没读过别名，连关掉重开都还是旧名字
+                                //（推送的内容本身就是旧的，与同步机制无关）。
+                                // 主窗口绘制用的是别名，所以表现是"两个窗口叫两个名字"。
+                                name: crate::model::library::display_name(
+                                    shortcut, &overrides,
+                                ),
                                 // 图标来源与主窗口绘制用的是同一个函数，
                                 // 所以两个窗口的图标必然一致。
                                 source: self.icon_source(i)?,
@@ -1561,11 +1630,22 @@ impl App {
     /// 打开 / 关闭某选项卡的弹出子窗口（侧栏右键菜单的入口）。    ///
     /// 返回"是否需要重绘"（菜单项文案会变，所以基本总是要重绘）。
     fn toggle_popout(&mut self, tab_key: &str) -> bool {
-        // 已经开着 → 关掉
-        if let Some(p) = self.popouts.remove(tab_key) {
+        // 已经开着 → 请求关闭。
+        //
+        // **只请求，不在这里把表项摘掉。**
+        //
+        // `close()` 是 `PostMessage(WM_CLOSE)`：窗口这一刻还没销毁，而窗口上下文
+        // 里存的是指向 `Box<Popout>` 的**裸指针**（`Window` 没有 `Drop`，
+        // 不会同步销毁窗口）。此刻从表里 `remove` 会当场释放那个 Box，
+        // 等 WM_CLOSE 被处理时（同一线程、稍后）就是悬垂指针 ——
+        // 与"先 attach 再装箱"那次崩溃是同一类错误。
+        //
+        // 收尾统一交给回报通道：窗口销毁时回报 key，
+        // `adopt_closed_popouts` 再从表里摘掉并把 `open` 落成 `false`。
+        // 两条关闭路径（菜单 vs 弹窗自己的 ✕）于是收敛成同一条。
+        if let Some(p) = self.popouts.get(tab_key) {
             p.close();
-            self.state.get_mut().popout.windows.remove(tab_key);
-            diag(&format!("弹出子窗口已关闭: {tab_key}"));
+            diag(&format!("弹出子窗口已请求关闭: {tab_key}"));
             return true;
         }
 
@@ -1602,6 +1682,7 @@ impl App {
         };
 
         match crate::popout::window::Popout::create(
+            tab_key,
             &title,
             geometry,
             self.scheme.clone(),
@@ -2361,22 +2442,18 @@ impl App {
         // 只取可见那一段：tiles 对应条目 first_item..first_item+len。
         //
         // 显示名优先用覆盖表里的**别名**（"重命名"的结果）。
-        // 不查别名的话，重命名会"存下去了但界面没变"，看起来像功能坏了。
+        // 规则本体在 `library::display_name`，弹出子窗口的推送走的是同一个函数 ——
+        // 这里不再内联一份，否则"重命名只在一个窗口生效"那类 bug 会再回来
+        //（那个 bug 就是这么产生的）。
         let overrides = self.state.get().entries.clone();
         let tile_labels: Vec<String> = self
             .visible
             .iter()
             .skip(first)
             .take(self.layout.tiles.len())
-            .map(|&i| {
-                let Some(s) = self.library.get(i) else {
-                    return String::new();
-                };
-                let key = crate::model::library::path_key(s);
-                overrides
-                    .get(&key)
-                    .and_then(|o| o.alias.clone())
-                    .unwrap_or_else(|| s.name.clone())
+            .map(|&i| match self.library.get(i) {
+                Some(s) => crate::model::library::display_name(s, &overrides),
+                None => String::new(),
             })
             .collect();
         let tile_label_refs: Vec<&str> = tile_labels.iter().map(|s| s.as_str()).collect();
@@ -4313,6 +4390,13 @@ impl App {
 
 impl Handler for App {
     fn on_event(&mut self, event: Event) -> bool {
+        // **先收下"某个弹窗自己关了"的回报，再处理这次事件。**
+        //
+        // 必须在 match 之前：右键菜单的文案是按 `self.popouts` 生成的，
+        // 晚一步修正，用户刚用弹窗自己的 ✕ 关掉、再来右键，
+        // 看到的就还是「关闭子窗口」。见 `adopt_closed_popouts`。
+        self.adopt_closed_popouts();
+
         match event {
             Event::Resized { width, height } => {
                 self.on_resized(width, height);
@@ -4496,6 +4580,10 @@ impl Handler for App {
     }
 
     fn on_destroyed(&mut self) {
+        // 存盘之前再收一次回报：弹窗可能是刚被自己的 ✕ 关掉的，
+        // 而用户之后没碰过主窗口（那这条回报就只有这里能收到）。
+        // 漏掉它的话，落盘的 `open` 还是 `true`，下次启动会把它恢复出来。
+        self.adopt_closed_popouts();
         self.save_state();
     }
 }

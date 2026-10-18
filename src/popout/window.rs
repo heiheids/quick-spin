@@ -28,6 +28,12 @@ pub struct Popout {
     scheme: Scheme,
     /// 标题（用户自命名，或退回选项卡名）
     title: String,
+    /// 这个弹窗对应哪个选项卡（配置里的稳定 key）。
+    ///
+    /// 存 key 而不是标题：装配层按 key 存表（`App::popouts`），而且标题是
+    /// 用户可以随时改的自由文本，改完就再也对不回是哪个选项卡了。
+    /// 窗口自己关掉时要把这个 key 回报上去（见 `popout::report`）。
+    tab_key: String,
     /// 当前悬停的标题栏按钮
     hover: Option<TitleButton>,
     /// 是否正在拖动窗口尺寸
@@ -44,7 +50,10 @@ pub struct Popout {
 
 impl Popout {
     /// 创建一个弹出子窗口。
+    ///
+    /// `tab_key` 是它对应的选项卡 key，窗口自己关掉时要靠它回报装配层。
     pub fn create(
+        tab_key: &str,
         title: &str,
         geometry: Geometry,
         scheme: Scheme,
@@ -79,6 +88,7 @@ impl Popout {
             layout,
             scheme,
             title: title.to_string(),
+            tab_key: tab_key.to_string(),
             hover: None,
             resizing: false,
             content: Content {
@@ -343,6 +353,19 @@ impl Handler for Popout {
         // 注意这里**不能**返回 `Exit` 之外的语义：`Exit` 在本窗口上
         // 只意味着 DestroyWindow，主窗口不受影响。
         CloseAction::Exit
+    }
+
+    /// 窗口即将销毁 → **回报装配层**。
+    ///
+    /// 不回报的话，弹窗被自己的 ✕ 关掉之后 `App::popouts` 里会留着一个死窗口：
+    /// 右键菜单仍然显示「关闭子窗口」、`state` 里的 `open` 也还是 `true`。
+    /// 详见 `popout::report`。
+    ///
+    /// 放在这里而不是 `on_close_request`：后者只有走 `WM_CLOSE` 才被调用，
+    /// 而销毁覆盖所有路径。放这里也顺带保证了**回报时 `self` 还活着** ——
+    /// 装配层要等到下一次收尾点才把 `Box<Popout>` 摘掉。
+    fn on_destroyed(&mut self) {
+        crate::popout::report::report_closed(&self.tab_key);
     }
 
     fn wants_tray(&self) -> bool {
