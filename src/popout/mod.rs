@@ -32,6 +32,7 @@
 //! 不用下标 —— 下标在增删选项卡后会漂移。
 
 pub mod layout;
+pub mod painter;
 pub mod state;
 
 pub use state::PopoutState;

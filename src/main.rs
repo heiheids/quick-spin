@@ -674,6 +674,92 @@ fn selftest() -> ExitCode {
         );
     }
 
+    // 弹出子窗口标题栏四个图标的外形。纯几何，验证"画的和点的在同一块地方"。
+    {
+        use popout::layout::{PopoutLayout, TITLE_BUTTONS};
+        use popout::painter::{Glyph, clover_colors, glyph};
+
+        let mut failures: Vec<String> = Vec::new();
+
+        for (w, h) in [(200, 160), (320, 420), (900, 1400)] {
+            let l = PopoutLayout::compute(w, h, 48);
+            let tag = format!("{w}×{h}");
+
+            for (i, btn) in TITLE_BUTTONS.iter().enumerate() {
+                let rect = l.buttons[i];
+                let shapes = glyph(*btn, rect, false);
+                if shapes.is_empty() {
+                    failures.push(format!("{tag} {btn:?} 没有外形"));
+                    continue;
+                }
+                // 每个原语都必须落在自己的按钮矩形内（0.01 容差给浮点）
+                for (k, s) in shapes.iter().enumerate() {
+                    let (x0, y0, x1, y1) = s.bounds();
+                    if x0 < rect.x as f32 - 0.01
+                        || y0 < rect.y as f32 - 0.01
+                        || x1 > (rect.x + rect.w) as f32 + 0.01
+                        || y1 > (rect.y + rect.h) as f32 + 0.01
+                    {
+                        failures.push(format!("{tag} {btn:?} 第 {k} 个原语画出按钮外"));
+                    }
+                }
+            }
+
+            // 四个图标外形必须互不相同，否则用户分不清哪个是哪个
+            let sigs: Vec<String> = TITLE_BUTTONS
+                .iter()
+                .map(|b| {
+                    glyph(*b, l.buttons[0], false)
+                        .iter()
+                        .map(|g| match g {
+                            Glyph::Disc { .. } => 'D',
+                            Glyph::Line { .. } => 'L',
+                        })
+                        .collect::<String>()
+                })
+                .collect();
+            if sigs.iter().collect::<std::collections::HashSet<_>>().len() != 4 {
+                failures.push(format!("{tag} 有图标外形重复: {sigs:?}"));
+            }
+
+            // 叉必须左右对称
+            let close = l.buttons[3];
+            let x = glyph(popout::layout::TitleButton::Close, close, false);
+            if let (
+                [Glyph::Line { a: a0, b: b0, .. }, Glyph::Line { a: a1, b: b1, .. }],
+                true,
+            ) = (x.as_slice(), x.len() == 2)
+            {
+                let cx = close.x as f32 + close.w as f32 / 2.0;
+                if (a0.0 - cx).abs() != (a1.0 - cx).abs() || (b0.0 - cx).abs() != (b1.0 - cx).abs()
+                {
+                    failures.push(format!("{tag} 叉左右不对称"));
+                }
+            } else {
+                failures.push(format!("{tag} 叉不是两条线"));
+            }
+        }
+
+        // "彩色"四叶草：四个圆必须是四个不同颜色
+        if clover_colors()
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != 4
+        {
+            failures.push("四叶草颜色有重复".to_string());
+        }
+
+        println!(
+            "弹出窗图标 : {}",
+            if failures.is_empty() {
+                "3 种尺寸下 4 个图标 全部落在各自按钮内 / 外形互不相同 / 叉左右对称 / 四叶草四色不同 —— 全部通过".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
     println!(
         "后台扫描   : 已就绪，共 {} 条；选项卡「{}」显示 {} 条",
         app.scanned_total(),
