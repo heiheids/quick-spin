@@ -179,6 +179,38 @@ impl Default for Appearance {
     }
 }
 
+/// 窗口外框的圆角：**系统侧偏好**与**面板绘制半径**必须同源。
+///
+/// 为什么要把两者绑成一个值：它们不一致时会出现最难看的一种组合 ——
+/// 我们自己把面板画成直角、而 DWM 仍按系统偏好把窗口角部裁圆，
+/// 于是四个角上露出后面的桌面（见 `platform::acrylic::set_round_corners` 的说明）。
+/// 主窗口与弹出子窗口都必须用同一份，所以这个推导只能有一处（架构文档 §17.9）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CornerStyle {
+    /// 是否要求 DWM 给窗口加系统圆角。
+    pub rounded: bool,
+    /// 面板绘制半径（逻辑像素）。平面模式下是 `0` —— 面板直角 + 系统直角。
+    pub radius: f32,
+}
+
+impl Appearance {
+    /// 由"外圈玻璃是否生效"推出外框圆角，**这是唯一出处**。
+    ///
+    /// 依据是 `outer_glass` 而不是 [`Self::system_round_corners`]：后者在全项目里
+    /// 只出现在定义与默认值处，**从未被读取**（和 `start_hidden` 一样是个空配置项）。
+    /// 这里按主窗口的**实际**行为对齐，而不是顺手把一个空配置项接上 ——
+    /// 那会改变行为，属于要使用者拍板的事。
+    ///
+    /// `outer_glass` 为假是"平面模式"：窗口外不申请模糊、不留任何透明区域，
+    /// 所以系统圆角也必须一起关掉。
+    pub fn corner_style(&self, outer_glass: bool) -> CornerStyle {
+        CornerStyle {
+            rounded: outer_glass,
+            radius: if outer_glass { self.corner_radius } else { 0.0 },
+        }
+    }
+}
+
 /// 布局尺寸。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

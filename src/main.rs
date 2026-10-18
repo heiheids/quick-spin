@@ -1471,6 +1471,71 @@ fn selftest() -> ExitCode {
         );
     }
 
+    // 窗口外框的圆角：系统偏好与面板半径必须**同源**。
+    //
+    // 这条规则被三处消费（主窗口的 `acrylic::apply`、主窗口面板绘制、
+    // 每个弹出子窗口）。弹窗此前既不设系统圆角、面板半径又写死 10.0，
+    // 于是拿到 Win11 的默认圆角 —— 使用者报的"弹出小窗底部是圆角"。
+    // 这里把推导钉死，任何人把它改回去都会立刻看见失败。
+    {
+        use config::model::Appearance;
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // 开了外圈玻璃：系统圆角开，面板用配置里的半径
+        let on = Appearance {
+            outer_glass: true,
+            corner_radius: 16.0,
+            ..Default::default()
+        };
+        let c = on.corner_style(true);
+        if !c.rounded || (c.radius - 16.0).abs() > f32::EPSILON {
+            failures.push(format!("外圈玻璃开时应为 圆角/16.0，实为 {c:?}"));
+        }
+
+        // 关掉外圈玻璃 = 平面模式：**系统圆角也必须一起关**
+        //（只关面板半径的话，DWM 仍会把窗口角部裁圆、露出桌面）
+        let c = on.corner_style(false);
+        if c.rounded || c.radius != 0.0 {
+            failures.push(format!("平面模式应为 直角/0.0，实为 {c:?}"));
+        }
+
+        // 边界：半径为 0 但玻璃开着 —— 面板是直角，系统偏好仍为"圆角"。
+        // 两者**不同**是合法的：`rounded` 说的是"要不要用系统圆角能力"，
+        // 而 DWM 对 0 半径没有意见；把它当成"必须一起为假"就会引入一条假规则。
+        let zero = Appearance {
+            outer_glass: true,
+            corner_radius: 0.0,
+            ..Default::default()
+        };
+        let c = zero.corner_style(true);
+        if !c.rounded || c.radius != 0.0 {
+            failures.push(format!("半径 0 且玻璃开时应为 圆角/0.0，实为 {c:?}"));
+        }
+
+        // 生效值来自"实际外圈玻璃状态"，而不是配置里的 `outer_glass` 字段：
+        // 设置面板改的是 state.toml 的覆盖项，config 里那份可能仍是旧值。
+        // 这里用 `App` 的生效值再算一次，确认它与配置同规则。
+        let live = app.outer_glass_enabled();
+        let cfg_style = app.corner_style_for_test();
+        if cfg_style.rounded != live {
+            failures.push(format!(
+                "系统圆角偏好({})与生效的外圈玻璃({live})不一致",
+                cfg_style.rounded
+            ));
+        }
+
+        selftest_line!(
+            "外框圆角   : {}",
+            if failures.is_empty() {
+                "玻璃开=圆角+配置半径 / 玻璃关=直角+0.0 / 半径0是合法边界 / 取自生效值而非配置字段 —— 全部通过"
+                    .to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
     selftest_line!(
         "后台扫描   : 已就绪，共 {} 条；选项卡「{}」显示 {} 条",
         app.scanned_total(),

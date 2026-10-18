@@ -233,19 +233,25 @@ impl PopoutPainter {
     ///
     /// `items` 是要显示的条目（与主窗口该选项卡的可见条目同步），
     /// `icons` 是它们对应的位图，缺失的位置是 `None`（还没加载好）。
+    ///
+    /// `panel_radius` 是**面板外框**的圆角半径，由装配层算好传来
+    ///（规则见 `Appearance::corner_style`）—— 弹窗与主窗口必须用同一个值，
+    /// 这里不再自己写死。注意它只作用于面板本身：方格、按钮、选色浮层这些
+    /// **内部控件**的半径与此无关，不要跟着变。
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         ctx: &ID2D1DeviceContext,
         text: &mut TextEngine,
-    layout: &PopoutLayout,
-    scheme: &Scheme,
-    title: &str,
-    hover: Option<TitleButton>,
-    states: ButtonStates,
-    items: &[Item],
-    icons: &[Option<ID2D1Bitmap1>],
-) -> Result<()> {
+        layout: &PopoutLayout,
+        scheme: &Scheme,
+        title: &str,
+        hover: Option<TitleButton>,
+        states: ButtonStates,
+        items: &[Item],
+        icons: &[Option<ID2D1Bitmap1>],
+        panel_radius: f32,
+    ) -> Result<()> {
         let Some(brush) = &self.brush else {
             return Ok(());
         };
@@ -253,11 +259,13 @@ impl PopoutPainter {
         // SAFETY: COM 调用；所有结构体都是本函数栈上的局部量。
         unsafe {
             // ---- 面板底 ----
+            // 半径来自装配层（与主窗口同源）；平面模式下是 0，面板就是直角 ——
+            // 那种情况下 DWM 的系统圆角也被一起关掉，角上不会露出桌面。
             brush.SetColor(&to_d2d(scheme.panel.from));
-            ctx.FillRoundedRectangle(&rounded_i(layout.panel, 10.0), brush);
+            ctx.FillRoundedRectangle(&rounded_i(layout.panel, panel_radius), brush);
             // 同色系描边（方向由面板亮度决定，见 theme::finalize）
             brush.SetColor(&to_d2d(scheme.border.from));
-            ctx.DrawRoundedRectangle(&rounded_i(layout.panel, 10.0), brush, 1.2, None);
+            ctx.DrawRoundedRectangle(&rounded_i(layout.panel, panel_radius), brush, 1.2, None);
 
             // ---- 标题栏底色：取渐变的另一端，让它读起来是"一条栏" ----
             brush.SetColor(&to_d2d(scheme.panel.to));

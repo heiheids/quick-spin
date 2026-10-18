@@ -678,11 +678,14 @@ impl App {
         } else {
             Backdrop::None
         };
+        // 系统圆角偏好与面板半径的唯一出处（这一步必须在 `apply` 之前算好）
+        let corners = cfg.appearance.corner_style(outer_glass);
         let backdrop = acrylic::apply(
             window.hwnd(),
             requested,
             scheme.acrylic_tint(cfg.appearance.opacity),
-            outer_glass,
+            // 系统圆角偏好与下面布局里的面板半径同源（见 `App::corner_style`）
+            corners.rounded,
         );
         if backdrop != requested {
             eprintln!(
@@ -716,11 +719,8 @@ impl App {
                 panel_inset: layout_inset,
                 // 平面模式下连圆角也去掉：圆角外那圈三角区域是透明的，
                 // 只要还有圆角，"窗口外完全无透明"就做不到。
-                corner_radius: if outer_glass {
-                    cfg.appearance.corner_radius
-                } else {
-                    0.0
-                },
+                // 值与上面传给 `acrylic::apply` 的系统圆角偏好同源。
+                corner_radius: corners.radius,
                 sidebar_width: SIDEBAR_WIDTH,
                 tile_gap: cfg.layout.tile_gap,
                 columns: cfg.layout.columns,
@@ -1359,11 +1359,8 @@ impl App {
                 width: dip_w,
                 height: dip_h,
                 panel_inset: layout_inset,
-                corner_radius: if self.outer_glass() {
-                    self.cfg.appearance.corner_radius
-                } else {
-                    0.0
-                },
+                // 与 `acrylic::apply` 的系统圆角偏好同源（见 `App::corner_style`）
+                corner_radius: self.corner_style().radius,
                 sidebar_width: SIDEBAR_WIDTH,
                 tile_gap: self.cfg.layout.tile_gap,
                 columns: self.cfg.layout.columns,
@@ -1888,6 +1885,9 @@ impl App {
             saved.docked,
             saved.dock_side,
             saved.pinned,
+            // 外框圆角：系统偏好与面板半径都取自同一处（`App::corner_style`），
+            // 所以弹窗的角与主窗口必然一致。
+            self.corner_style(),
         ) {
             Ok(p) => {
                 // **必须先装箱、再 attach。顺序反了就是悬垂指针。**
@@ -2998,6 +2998,21 @@ impl App {
         self.outer_glass()
     }
 
+    /// 自检用：当前生效的外框圆角（与 `corner_style` 同一处推导）。
+    pub fn corner_style_for_test(&self) -> crate::config::model::CornerStyle {
+        self.corner_style()
+    }
+
+    /// 窗口外框圆角（系统偏好 + 面板半径）。**这是本程序里唯一一处推导**。
+    ///
+    /// 主窗口自己的 `acrylic::apply` 与面板绘制、以及每个弹出子窗口，全都取它。
+    /// 以前这三处各自内联 `if outer_glass { corner_radius } else { 0.0 }`，
+    /// 而弹窗干脆写死了面板半径、也从不设系统圆角 —— 于是拿到 Win11 的默认圆角，
+    /// 表现为"弹出小窗底部是圆角"。
+    fn corner_style(&self) -> crate::config::model::CornerStyle {
+        self.cfg.appearance.corner_style(self.outer_glass())
+    }
+
     fn always_on_top(&self) -> bool {
         self.state
             .get()
@@ -3074,14 +3089,26 @@ impl App {
         } else {
             Backdrop::None
         };
+        let corners = self.corner_style();
         self.backdrop = acrylic::apply(
             self.window.hwnd(),
             requested,
             self.scheme.acrylic_tint(self.cfg.appearance.opacity),
-            self.outer_glass(),
+            corners.rounded,
         );
         // 布局随"是否留发光边距"变化，必须一起重算
         self.rebuild_layout();
+        // 弹窗的圆角也要跟着换：使用者切「外圈玻璃」时，它是**外框**的一部分，
+        // 漏掉这一处就是"主窗口变直角了、弹窗还是圆的"（这正是原始报障的另一半）。
+        // 只在真的变了才动 DWM（`set_corners` 自己会挡住重复设置）。
+        let keys: Vec<String> = self.popouts.keys().cloned().collect();
+        for k in keys {
+            if let Some(p) = self.popouts.get_mut(&k) {
+                if p.set_corners(corners) {
+                    p.request_redraw();
+                }
+            }
+        }
     }
 
     /// 点设置面板里的第 `row` 项。返回是否需要重绘。

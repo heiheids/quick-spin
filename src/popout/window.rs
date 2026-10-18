@@ -11,6 +11,8 @@ use crate::error::Result;
 use crate::platform::hittest::HitTest;
 use crate::platform::window::{CloseAction, Event, Geometry, Handler, Rect, Window};
 use crate::popout::dock::{self, DockRequest};
+use crate::config::model::CornerStyle;
+use crate::platform::acrylic;
 use crate::popout::icons::{Content, PopoutIcons, pixel_size};
 use crate::popout::layout::{PopoutLayout, TitleButton};
 use crate::popout::painter::{ButtonStates, PopoutPainter};
@@ -112,6 +114,12 @@ pub struct Popout {
     drag_start: Option<(i32, i32, i32, i32)>,
     /// 上一次**由本程序**摆出去的位置。用来跳过重复的 `SetWindowPos`。
     last_pos: Option<(i32, i32)>,
+    /// 窗口外框的圆角（系统偏好 + 面板半径），**由装配层算好传进来**。
+    ///
+    /// 这里不自己推 `if outer_glass { corner_radius } else { 0 }`：那条规则
+    /// 主窗口也在用，两处各写一份必然漂移（架构文档 §17.9 的清单）。
+    /// 设置变化时由 `App::apply_backdrop` 推新值（见 [`Popout::set_corners`]）。
+    corners: CornerStyle,
 }
 
 impl Popout {
@@ -132,8 +140,13 @@ impl Popout {
         docked: bool,
         dock_side: DockSide,
         pinned: bool,
+        corners: CornerStyle,
     ) -> Result<Self> {
         let window = Window::create(title, geometry, false)?;
+        // 系统侧圆角必须显式设一次：Win11 对顶层窗口默认就给圆角，
+        // 不设就会拿到系统默认值 —— 使用者报的"弹出小窗底部是圆角"就是这个来源
+        //（主窗口一直在 `acrylic::apply` 里设，弹窗从来没设过）。
+        acrylic::set_round_corners(window.hwnd(), corners.rounded);
         let (cw, ch) = window.client_size();
         let dpi = window.dpi();
         let (renderer, composer) =
@@ -185,6 +198,7 @@ impl Popout {
             phys: (cw.max(1), ch.max(1)),
             drag_start: None,
             last_pos: geometry.x.zip(geometry.y),
+            corners,
         })
     }
 
@@ -397,6 +411,21 @@ impl Popout {
             return false;
         }
         self.scheme = palette::resolve_scheme(&self.base_color, &self.main_scheme);
+        true
+    }
+
+    /// 装配层换了外框圆角（使用者切换「外圈玻璃」）。
+    ///
+    /// 返回是否需要重绘。**系统偏好与面板半径一起换**：只换面板半径的话，
+    /// DWM 仍按旧偏好裁角，四个角会露出桌面（反之则是角上多出一块直角）。
+    ///
+    /// 只在真的变了才调 DWM：那是窗口属性，不该每帧设。
+    pub fn set_corners(&mut self, corners: CornerStyle) -> bool {
+        if corners == self.corners {
+            return false;
+        }
+        self.corners = corners;
+        acrylic::set_round_corners(self.window.hwnd(), corners.rounded);
         true
     }
 
@@ -831,6 +860,8 @@ impl Handler for Popout {
                 states,
                 &self.content.items,
                 &bitmaps,
+                // 面板半径由装配层算好传来（规则见 `Appearance::corner_style`）
+                self.corners.radius,
             );
 
             // ---- 选色浮层（**最后画 = 最上层**）----

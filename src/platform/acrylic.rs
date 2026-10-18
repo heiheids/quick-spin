@@ -206,7 +206,13 @@ fn set_system_backdrop(hwnd: HWND, kind: i32) -> bool {
 /// 注意这是**系统侧**的圆角：即便我们自己把面板画成直角，
 /// 只要这里还要求圆角，DWM 仍会把窗口角部裁圆，露出后面的桌面。
 /// 要做到"窗口外什么都没有"，这里必须一起设成不圆角。
-fn set_round_corners(hwnd: HWND, round: bool) {
+///
+/// **为什么是 `pub` 而不是让调用方走 [`apply`]**：弹出子窗口只要这一件事 ——
+/// 它不该申请背景模糊（模糊是主窗口的东西），也不需要色调。
+/// 走 `apply` 就得把一个假的 `Backdrop` 和一份用不上的 `Color` 塞进去，
+/// 调用点会变得看不出意图；把这一件事单独暴露出来最省事也最清楚。
+/// 主窗口仍然走 `apply`（它确实要材质 + 圆角一起设）。
+pub fn set_round_corners(hwnd: HWND, round: bool) {
     let preference: i32 = if round { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
     // SAFETY: 传入的是本函数栈上 i32 的地址，长度参数与之一致。
     let _ = unsafe {
