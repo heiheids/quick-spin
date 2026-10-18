@@ -1514,9 +1514,24 @@ impl App {
             self.scheme.clone(),
             self.layout.icon_size as i32,
         ) {
-            Ok(mut p) => {
-                p.attach();
-                self.popouts.insert(tab_key.to_string(), Box::new(p));
+            Ok(p) => {
+                // **必须先装箱、再 attach。顺序反了就是悬垂指针。**
+                //
+                // `attach` 把处理器地址存进窗口上下文（裸指针）。若先 attach
+                // 再 `Box::new(p)`，值会从栈搬到堆，先前那个地址当场失效，
+                // 子窗口第一次绘制就会踩到已释放的栈内存 —— 表现是整个进程崩掉
+                //（主窗口一起消失，看起来像"主窗口被关了"）。
+                //
+                // 装箱之后地址在堆上、且不随容器扩容而变，才满足 `attach_ptr`
+                // 要求的"地址稳定"。
+                let mut boxed = Box::new(p);
+                boxed.attach();
+                // 显示出来。`Window::create` 只创建、不显示
+                //（`WS_POPUP` 不含 `WS_VISIBLE`），主窗口也是在创建后自己
+                // 调 `show()`（见 `App::new` 里的 `window.show()`）。
+                // 漏掉这一步的表现是"点了菜单什么都没出现"，不报错。
+                boxed.show();
+                self.popouts.insert(tab_key.to_string(), boxed);
                 // 记下"开着"，下次启动自动恢复
                 let mut w = saved;
                 w.open = true;

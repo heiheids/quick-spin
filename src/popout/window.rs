@@ -87,6 +87,15 @@ impl Popout {
         self.window.close();
     }
 
+    /// 显示窗口。
+    ///
+    /// **必须显式调用**：`Window::create` 只创建不显示（`WS_POPUP` 里没有
+    /// `WS_VISIBLE`），主窗口那边也是在创建后自己调 `show()`。
+    /// 漏掉这一步的表现是"点了菜单什么都没出现"，而不是报错。
+    pub fn show(&self) {
+        self.window.show();
+    }
+
     /// 移动/改变尺寸（吸附跟随、拖动脱离都用它）。
     #[allow(dead_code)]
     pub fn set_geometry(&self, g: Geometry) {
