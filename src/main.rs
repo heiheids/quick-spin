@@ -380,15 +380,33 @@ fn find_a_lnk() -> Option<std::path::PathBuf> {
     None
 }
 
+/// 自检输出必须走这个宏：它顺手登记"这一行是不是失败"（含 `⚠` 即失败）。
+///
+/// 这个口子是补出来的。原先自检的退出码**恒为 `SUCCESS`**，一次反向验证证明
+/// "故意改坏 → 报出两条失败 → 退出码仍然是 0" —— 也就是说，凡是以退出码为判据
+/// 的人（脚本、CI、以及后来的我）都会把红的看成绿的。判据有两个来源必然会脱节，
+/// 所以让它只有一个来源：**输出由谁产生，成败就由谁登记**。
+static SELFTEST_WARNINGS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+macro_rules! selftest_line {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        if line.contains('⚠') {
+            SELFTEST_WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        println!("{line}");
+    }};
+}
 fn selftest() -> ExitCode {
     let _ = unsafe { windows::Win32::System::Console::SetConsoleOutputCP(65001) };
 
-    println!("图形链路自检（窗口不会显示）");
-    println!("{}", "─".repeat(64));
+    selftest_line!("图形链路自检（窗口不会显示）");
+    selftest_line!("{}", "─".repeat(64));
 
     let baseline = platform::memory::snapshot();
     if let Some(m) = baseline {
-        println!(
+        selftest_line!(
             "进程基线   : 私有提交 {} / 工作集 {}",
             platform::memory::human(m.private_commit),
             platform::memory::human(m.working_set)
@@ -405,12 +423,12 @@ fn selftest() -> ExitCode {
 
     let after_init = platform::memory::snapshot();
     if let (Some(b), Some(a)) = (baseline, after_init) {
-        println!(
+        selftest_line!(
             "建窗口+设备: 私有提交 {}  （本阶段 +{}，主要是 D3D11/D2D 设备与驱动分配）",
             platform::memory::human(a.private_commit),
             platform::memory::human(a.private_commit.saturating_sub(b.private_commit))
         );
-        println!(
+        selftest_line!(
             "            工作集 {}（含共享 DLL，仅供参考）",
             platform::memory::human(a.working_set)
         );
@@ -419,17 +437,17 @@ fn selftest() -> ExitCode {
     // 配置里请求的材质若不被系统支持，App::new 会另外打印一行降级说明。
     let effective = app.backdrop();
     if app.outer_glass_enabled() {
-        println!("外圈玻璃   : 开；实际材质 {effective:?}");
+        selftest_line!("外圈玻璃   : 开；实际材质 {effective:?}");
         if effective == config::theme::Backdrop::None {
-            println!("             ⚠ 模糊未生效，面板会退化为纯半透明（系统不支持所选项）");
+            selftest_line!("             ⚠ 模糊未生效，面板会退化为纯半透明（系统不支持所选项）");
         }
     } else {
         // 这是用户主动关闭的，不是失败
-        println!("外圈玻璃   : 关（设置面板里关掉的）；面板按实心不透明绘制");
+        selftest_line!("外圈玻璃   : 关（设置面板里关掉的）；面板按实心不透明绘制");
     }
 
     match app.draw_once() {
-        Ok(()) => println!("绘制一帧   : 成功（BeginDraw → 面板/描边/发光/侧栏/网格 → EndDraw → Present）"),
+        Ok(()) => selftest_line!("绘制一帧   : 成功（BeginDraw → 面板/描边/发光/侧栏/网格 → EndDraw → Present）"),
         Err(e) => {
             eprintln!("绘制失败: {e}");
             return ExitCode::FAILURE;
@@ -444,13 +462,13 @@ fn selftest() -> ExitCode {
     {
         let (avg_raw, worst_raw) = app.selftest_frame_bench(40, true);
         let (avg_vs, worst_vs) = app.selftest_frame_bench(40, false);
-        println!(
+        selftest_line!(
             "帧耗时     : 不等同步 平均 {:>5.1}ms / 最慢 {:>5.1}ms  → 上限 {:>3.0} fps",
             avg_raw,
             worst_raw,
             1000.0 / avg_raw.max(0.01)
         );
-        println!(
+        selftest_line!(
             "             等同步   平均 {:>5.1}ms / 最慢 {:>5.1}ms  → 上限 {:>3.0} fps",
             avg_vs,
             worst_vs,
@@ -462,12 +480,12 @@ fn selftest() -> ExitCode {
         // 非 0 且随帧数增长 ⇒ 有图标永远提取不成功，而每帧都在重试，
         // 加载线程会一直做白工（拖动时的卡顿就是这么来的）。
         let re = app.selftest_icon_rerequests(10, 30);
-        println!("图标请求   : 30 帧内发起 {re} 次（含首次请求，不代表异常）");
+        selftest_line!("图标请求   : 30 帧内发起 {re} 次（含首次请求，不代表异常）");
 
         // 真正的判据：有多少图标**试满次数后放弃**了。
         // 那才是"某个方格永远没有图标"，需要定位。
         let (failing, blocked) = app.selftest_icon_failures();
-        println!(
+        selftest_line!(
             "图标失败   : 待重试 {failing} 个 / 已放弃 {blocked} 个{}",
             if blocked == 0 {
                 "（正常：没有永远提取不成功的图标）"
@@ -481,7 +499,7 @@ fn selftest() -> ExitCode {
         // 期望 `asked` 与 `steps` 基本相等：前几步位移还在 `MARQUEE_MIN`（3px）
         // 阈值内，那时选框还没开始画，不请求重绘是对的，所以允许差一两次。
         let (steps, asked) = app.selftest_marquee_redraws(60);
-        println!(
+        selftest_line!(
             "框选重绘率 : {asked}/{steps} 次移动请求了重绘{}",
             if steps == 0 {
                 "（跳过：内容区左下角被方格占住了）"
@@ -575,7 +593,7 @@ fn selftest() -> ExitCode {
             failures.push("标题回退不对");
         }
 
-        println!(
+        selftest_line!(
             "弹出窗状态 : {}",
             if failures.is_empty() {
                 "默认值 / 尺寸夹紧 / 钉住与吸附正交 / get 不写入 / to_open 排序 / retain_tabs / 标题回退 —— 全部通过".to_string()
@@ -719,7 +737,7 @@ fn selftest() -> ExitCode {
             failures.push("没有显示器工作区时仍给出了位置".to_string());
         }
 
-        println!(
+        selftest_line!(
             "吸附跟随   : {}",
             if failures.is_empty() {
                 "右吸附 / 右放不下翻左 / 左放不下翻右 / 两侧都放不下夹紧 / 垂直夹紧 / 移动跟随 / 超宽不 panic / 无工作区不摆 —— 全部通过（逐项比对期望值）".to_string()
@@ -867,7 +885,7 @@ fn selftest() -> ExitCode {
             }
         }
 
-        println!(
+        selftest_line!(
             "弹窗配色   : {}",
             if failures.is_empty() {
                 "色板单一出处 / 往返可回查 / 自定义色不高亮 / 跟随主窗口 / 派生确定 / 非法值回落 / 浮层不越界 / 命中一一对应 / 极窄窗口不 panic —— 全部通过（逐项比对期望值）".to_string()
@@ -934,7 +952,7 @@ fn selftest() -> ExitCode {
             failures.push("窗口状态没变时合并结果却与记录不同（会每次落盘）".to_string());
         }
 
-        println!(
+        selftest_line!(
             "弹窗配色落盘: {}",
             if failures.is_empty() {
                 "配色穿过合并 / 跟随主窗口也能穿过 / 名字用记录值 / 无变化不写盘 —— 全部通过（逐项比对期望值）".to_string()
@@ -973,7 +991,7 @@ fn selftest() -> ExitCode {
 
         let open: Vec<&str> = st.to_open().into_iter().map(|(k, _)| k).collect();
         let want = vec!["tab2", "tab3"];
-        println!(
+        selftest_line!(
             "启动恢复   : {}",
             if open == want {
                 "只恢复 open 的窗口 / 按选项卡 key 排序稳定（tab2, tab3）—— 通过".to_string()
@@ -984,7 +1002,7 @@ fn selftest() -> ExitCode {
     }
 
     // 主窗口标志：决定关闭主窗口时程序退不退出。    // 错了不会报错，只是关了窗口进程还在 —— 必须单独验。
-    println!(
+    selftest_line!(
         "多窗口基础 : 主窗口标志 {}；活着的窗口 {} 个",
         if app.selftest_main_window_flag() { "已置位" } else { "⚠ 未置位（关窗口将不退出）" },
         app.selftest_live_window_count()
@@ -1074,7 +1092,7 @@ fn selftest() -> ExitCode {
             failures.push("换行位置不对".to_string());
         }
 
-        println!(
+        selftest_line!(
             "弹出窗布局 : {}",
             if failures.is_empty() {
                 format!(
@@ -1168,7 +1186,7 @@ fn selftest() -> ExitCode {
             failures.push("极窄窗口仍然命中了方格".to_string());
         }
 
-        println!(
+        selftest_line!(
             "弹窗点击命中: {}",
             if failures.is_empty() {
                 format!(
@@ -1256,7 +1274,7 @@ fn selftest() -> ExitCode {
             failures.push("四叶草颜色有重复".to_string());
         }
 
-        println!(
+        selftest_line!(
             "弹出窗图标 : {}",
             if failures.is_empty() {
                 "3 种尺寸下 4 个图标 全部落在各自按钮内 / 外形互不相同 / 叉左右对称 / 四叶草四色不同 —— 全部通过".to_string()
@@ -1361,7 +1379,7 @@ fn selftest() -> ExitCode {
             failures.push("启动目标变化没被察觉".to_string());
         }
 
-        println!(
+        selftest_line!(
             "弹出窗图标管线: {}",
             if failures.is_empty() {
                 "像素换算 6 档 / 键同源相等、随尺寸变化、按图与按图标分开 / 内容比较（改名·重排·改尺寸·换启动目标）—— 全部通过".to_string()
@@ -1413,7 +1431,7 @@ fn selftest() -> ExitCode {
             failures.push("别名清空后没有回退到原名".to_string());
         }
 
-        println!(
+        selftest_line!(
             "显示名规则 : {}",
             if failures.is_empty() {
                 "别名优先 / 无别名回退原名 / 别名清空回退原名 —— 全部通过".to_string()
@@ -1443,7 +1461,7 @@ fn selftest() -> ExitCode {
             failures.push("取走之后又取到同一批回报（会重复收尾）".to_string());
         }
 
-        println!(
+        selftest_line!(
             "弹窗关闭回报: {}",
             if failures.is_empty() {
                 "按选项卡 key 回报 / 取走即清空 —— 全部通过".to_string()
@@ -1453,7 +1471,7 @@ fn selftest() -> ExitCode {
         );
     }
 
-    println!(
+    selftest_line!(
         "后台扫描   : 已就绪，共 {} 条；选项卡「{}」显示 {} 条",
         app.scanned_total(),
         app.active_tab_key(),
@@ -1470,12 +1488,12 @@ fn selftest() -> ExitCode {
             Ok((dw, dh, pw, ph)) => {
                 let (cw, ch) = (w as f32, h as f32);
                 let ok = (dw - cw).abs() <= 2.0 && (dh - ch).abs() <= 2.0;
-                println!(
+                selftest_line!(
                     "改尺寸({label}) : 窗口 {cw:.0}×{ch:.0} → 渲染器 {dw:.0}×{dh:.0}，面板 {pw:.0}×{ph:.0}{}",
                     if ok { "" } else { "   ⚠ 渲染器未跟上窗口" }
                 );
                 if !ok {
-                    println!("             ⚠ 交换链没有按新尺寸重建，内容会被裁切或留白");
+                    selftest_line!("             ⚠ 交换链没有按新尺寸重建，内容会被裁切或留白");
                 }
             }
             Err(e) => {
@@ -1488,7 +1506,7 @@ fn selftest() -> ExitCode {
     // 验证滚动映射：把视口拉到底，确认能滚到列表末尾
     match app.selftest_scroll_to_end() {
         Ok((first, end, max_scroll, total, tab_key)) => {
-            println!(
+            selftest_line!(
                 "滚动到末尾 : 选项卡「{}」可见第 {}~{} 条（共 {} 条），总可滚 {:.0} DIP",
                 tab_key,
                 first + 1,
@@ -1497,7 +1515,7 @@ fn selftest() -> ExitCode {
                 max_scroll
             );
             if total > 0 && end < total {
-                println!("             ⚠ 末尾未完全可见，滚动计算可能有误");
+                selftest_line!("             ⚠ 末尾未完全可见，滚动计算可能有误");
             }
         }
         Err(e) => {
@@ -1511,11 +1529,11 @@ fn selftest() -> ExitCode {
         Ok(()) => {
             let ((blur_a, inset_a, rad_a), (blur_b, inset_b, rad_b)) = app.selftest_toggle_glass();
             let works = blur_a != blur_b;
-            println!(
+            selftest_line!(
                 "设置面板   : 绘制成功；玻璃开关{}",
                 if works { "已接通系统层" } else { "⚠ 未生效" }
             );
-            println!(
+            selftest_line!(
                 "             模糊 {} / 内缩 {:.0}px / 圆角 {:.0}px   →   模糊 {} / 内缩 {:.0}px / 圆角 {:.0}px",
                 if blur_a { "开" } else { "关" },
                 inset_a,
@@ -1527,7 +1545,7 @@ fn selftest() -> ExitCode {
             // 玻璃关闭时：内缩与圆角都必须为 0，否则窗口边角会残留透明
             for (blur, inset, radius) in [(blur_a, inset_a, rad_a), (blur_b, inset_b, rad_b)] {
                 if !blur && (inset > 0.5 || radius > 0.5) {
-                    println!("             ⚠ 平面模式下仍有内缩或圆角，窗口外会残留透明");
+                    selftest_line!("             ⚠ 平面模式下仍有内缩或圆角，窗口外会残留透明");
                 }
             }
         }
@@ -1540,11 +1558,11 @@ fn selftest() -> ExitCode {
     // 验证缩放行为：缩小图标必须让一屏放下更多条目
     {
         let rows = app.selftest_zoom();
-        println!("缩放验证   : 图标px → 方格px，列×行，一屏条目数");
+        selftest_line!("缩放验证   : 图标px → 方格px，列×行，一屏条目数");
         let mut last_items = usize::MAX;
         let mut monotonic = true;
         for (icon, side, cols, r, items) in &rows {
-            println!("              {icon:>3} → {side:>3}，{cols}×{r}，{items} 条");
+            selftest_line!("              {icon:>3} → {side:>3}，{cols}×{r}，{items} 条");
             // 档位从小到大遍历，所以"一屏条目数"必须**单调不增** ——
             // 图标变大，一屏能放的只会变少。
             // 之前写成"不能下降"，把正确行为当成了失效。
@@ -1554,7 +1572,7 @@ fn selftest() -> ExitCode {
             last_items = *items;
         }
         if !monotonic {
-            println!("             ⚠ 一屏条目数没有随图标变大而减少，布局算错了");
+            selftest_line!("             ⚠ 一屏条目数没有随图标变大而减少，布局算错了");
         }
     }
 
@@ -1562,7 +1580,7 @@ fn selftest() -> ExitCode {
     // 放在内存采样之前，这样图标的内存占用会被算进"绘制后"那一段。
     {
         let (count, used, budget, evictions, inflight, dims) = app.selftest_icons();
-        println!(
+        selftest_line!(
             "图标缓存   : {} 张位图，占用 {:.1} MB / 预算 {:.0} MB（淘汰 {} 次，仍在途 {}）",
             count,
             used as f64 / (1024.0 * 1024.0),
@@ -1570,7 +1588,7 @@ fn selftest() -> ExitCode {
             evictions,
             inflight,
         );
-        println!(
+        selftest_line!(
             "             单张 {:.0} KB，尺寸示例 {}",
             if count > 0 {
                 used as f64 / count as f64 / 1024.0
@@ -1580,14 +1598,14 @@ fn selftest() -> ExitCode {
             dims
         );
         if count == 0 {
-            println!("             ⚠ 一张图标都没加载出来，检查加载线程与提取链路");
+            selftest_line!("             ⚠ 一张图标都没加载出来，检查加载线程与提取链路");
         } else if used > budget {
-            println!("             ⚠ 超出预算，LRU 淘汰没起作用");
+            selftest_line!("             ⚠ 超出预算，LRU 淘汰没起作用");
         }
     }
 
     if let (Some(a), Some(d)) = (after_init, platform::memory::snapshot()) {
-        println!(
+        selftest_line!(
             "绘制后     : 私有提交 {}  （本阶段 +{}）",
             platform::memory::human(d.private_commit),
             platform::memory::human(d.private_commit.saturating_sub(a.private_commit))
@@ -1595,18 +1613,26 @@ fn selftest() -> ExitCode {
     }
 
     if let Some(m) = platform::memory::snapshot() {
-        println!("{}", "─".repeat(64));
-        println!(
+        selftest_line!("{}", "─".repeat(64));
+        selftest_line!(
             "空载总计   : 私有提交 {} / 工作集 {}",
             platform::memory::human(m.private_commit),
             platform::memory::human(m.working_set)
         );
-        println!("注意口径   : 任务管理器\"内存\"列是**私有工作集**，本工具尚未计算它");
-        println!("             想核对可在程序运行时执行：");
-        println!("             Get-Counter \"\\Process(quick-spin)\\Working Set - Private\"");
+        selftest_line!("注意口径   : 任务管理器\"内存\"列是**私有工作集**，本工具尚未计算它");
+        selftest_line!("             想核对可在程序运行时执行：");
+        selftest_line!("             Get-Counter \"\\Process(quick-spin)\\Working Set - Private\"");
     }
 
-    ExitCode::SUCCESS
+    // 退出码必须反映实际结果：任何一行带 `⚠` 都算失败。
+    // 不能恒返回 SUCCESS —— 那样"退出码 0"会被当成通过。
+    let warnings = SELFTEST_WARNINGS.load(std::sync::atomic::Ordering::Relaxed);
+    if warnings > 0 {
+        eprintln!("自检有 {warnings} 行告警/失败");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// 按名称关键词启动一个快捷方式。
