@@ -1212,6 +1212,31 @@ fn selftest() -> ExitCode {
                 failures.push(format!("{tag} 面板未覆盖客户区"));
             }
 
+            // 描边必须**完整落在客户区内**（2026-10-18 的"右下角白边"）。
+            //
+            // D2D 的 `DrawRoundedRectangle` 以路径为中心画线，所以外沿 =
+            // 矩形外扩半个线宽。若外沿超出客户区，那半个线宽会被窗口边缘裁掉，
+            // 弧上留下浅色毛边 —— 半径相对窗口越大（小窗口 + 圆角）越明显。
+            //
+            // 这条纯几何断言正好能钉住它，不需要真的建窗口。
+            {
+                let half = popout::layout::PANEL_STROKE / 2.0;
+                let (sl, st, sw, sh) = l.panel_stroke;
+                if sl - half < -0.001
+                    || st - half < -0.001
+                    || sl + sw + half > w as f32 + 0.001
+                    || st + sh + half > h as f32 + 0.001
+                {
+                    failures.push(format!(
+                        "{tag} 描边外沿越出客户区（描边 {sl},{st},{sw},{sh}，半线宽 {half}）"
+                    ));
+                }
+                // 半径也不能因内缩变成负数（那会让 D2D 行为不可预期）
+                if l.panel_stroke_radius(16.0) < 0.0 {
+                    failures.push(format!("{tag} 描边半径算成负数"));
+                }
+            }
+
             // 四个按钮都要落在窗口内
             for (i, b) in l.buttons.iter().enumerate() {
                 if b.x < 0 || b.y < 0 || b.x + b.w > w || b.y + b.h > h {
@@ -1284,7 +1309,7 @@ fn selftest() -> ExitCode {
             "弹出窗布局 : {}",
             if failures.is_empty() {
                 format!(
-                    "4 种尺寸下 按钮不越界/不重叠/关闭最右/标题不压按钮/内容区合法/命中正确/间距正确 —— 全部通过（典型 320×420：{} 列，方格 {}）",
+                    "4 种尺寸下 按钮不越界/不重叠/关闭最右/标题不压按钮/内容区合法/命中正确/间距正确/**描边不越出客户区** —— 全部通过（典型 320×420：{} 列，方格 {}）",
                     l.columns, l.tile
                 )
             } else {

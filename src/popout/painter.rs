@@ -24,7 +24,7 @@ use crate::popout::icons::Item;
 use crate::popout::palette::PaletteView;
 use crate::render::{Role, TextEngine};
 
-use crate::render::painters::{rounded_i, to_d2d};
+use crate::render::painters::{rounded, rounded_i, to_d2d};
 
 /// 一个绘制原语。坐标是**窗口内的逻辑像素**（不是相对按钮的），
 /// 这样绘制层可以直接用，测试层也可以直接判断它在不在按钮里。
@@ -264,8 +264,21 @@ impl PopoutPainter {
             brush.SetColor(&to_d2d(scheme.panel.from));
             ctx.FillRoundedRectangle(&rounded_i(layout.panel, panel_radius), brush);
             // 同色系描边（方向由面板亮度决定，见 theme::finalize）
+            //
+            // **用 `panel_stroke` 而不是 `panel`**：描边是以路径为中心画线的，
+            // 直接用与客户区重合的 `panel` 会让外侧半个线宽被窗口边缘裁掉，
+            // 弧上留下浅色毛边（小窗口 + 圆角时最明显）。矩形与半径都取自布局，
+            // 这里不做任何内缩算术 —— 几何只有一处。
             brush.SetColor(&to_d2d(scheme.border.from));
-            ctx.DrawRoundedRectangle(&rounded_i(layout.panel, panel_radius), brush, 1.2, None);
+            ctx.DrawRoundedRectangle(
+                &rounded(
+                    layout.panel_stroke,
+                    layout.panel_stroke_radius(panel_radius),
+                ),
+                brush,
+                crate::popout::layout::PANEL_STROKE,
+                None,
+            );
 
             // ---- 标题栏底色：取渐变的另一端，让它读起来是"一条栏" ----
             brush.SetColor(&to_d2d(scheme.panel.to));

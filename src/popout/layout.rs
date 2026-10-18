@@ -38,6 +38,12 @@ pub const TILES_TOP_GAP: i32 = 6;
 #[allow(dead_code)]
 pub const RESIZE_BORDER: i32 = 6;
 
+/// 面板描边宽度（DIP）。
+///
+/// **唯一出处**：布局用它算"描边矩形"，绘制用它当线宽。两处各写一个数字，
+/// 将来改了一处就会出现"描边画得出界/画在填充中间"这类只有肉眼能看出的错。
+pub const PANEL_STROKE: f32 = 1.2;
+
 /// 标题栏上的按钮。**枚举顺序即左→右的显示顺序**，
 /// 下标直接当命中结果用（见 [`PopoutLayout::button_at`]），所以不要随意调整。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +74,22 @@ pub struct PopoutLayout {
     pub height: i32,
     /// 窗口整体（画面板背景与描边用）
     pub panel: RectI,
+    /// **描边**用的矩形 `(left, top, width, height)`，已内缩半个描边宽度。
+    ///
+    /// ## 为什么需要它（2026-10-18 修）
+    ///
+    /// `panel` 与客户区完全重合（`(0,0,width,height)`），而 D2D 的
+    /// `DrawRoundedRectangle` 是**以路径为中心**画线的：直接用 `panel` 画，
+    /// 外侧那半个描边（0.6px）就落在客户区外，被窗口边缘与 DWM 的圆角裁剪削掉，
+    /// 弧上留下一道浅色毛边。半径相对窗口越大（即**小窗口 + 圆角**）越明显 ——
+    /// 使用者报的"小窗口圆角时候右下角有白边一点"正是这个。
+    ///
+    /// 所以描边矩形内缩半个线宽，让整条线**完整落在客户区内**。
+    /// 填充仍用 `panel`（不改观感）。
+    ///
+    /// 存 f32 而不是 `RectI`：半个线宽是 0.6，整数矩形表达不了
+    ///（`render::painters::settings` 里那条 1.2 描边出于同样理由用了 f32 版）。
+    pub panel_stroke: (f32, f32, f32, f32),
     /// 标题栏区域
     pub title_bar: RectI,
     /// 标题文字的排版区域
@@ -140,6 +162,13 @@ impl PopoutLayout {
             width,
             height,
             panel,
+            // 描边内缩半个线宽：这样整条线都落在客户区内（见字段说明）。
+            panel_stroke: (
+                PANEL_STROKE / 2.0,
+                PANEL_STROKE / 2.0,
+                (width as f32 - PANEL_STROKE).max(0.0),
+                (height as f32 - PANEL_STROKE).max(0.0),
+            ),
             title_bar,
             title_text,
             buttons,
@@ -148,6 +177,14 @@ impl PopoutLayout {
             tile,
             columns,
         }
+    }
+
+    /// 描边矩形的圆角半径。
+    ///
+    /// 内缩了多少，半径就减多少 —— 这样描边的中线与面板填充的轮廓**同心**，
+    /// 转角处不会出现"一边贴着填充、一边留缝"。减到负值没有意义，夹到 0。
+    pub fn panel_stroke_radius(&self, panel_radius: f32) -> f32 {
+        (panel_radius - PANEL_STROKE / 2.0).max(0.0)
     }
 
     /// 第 `index` 个方格的位置（逻辑像素，左上角）。
