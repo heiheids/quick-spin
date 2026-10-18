@@ -295,8 +295,11 @@ impl Popout {
 
     /// 吸附跟随：主窗口动了，把它摆到该在的位置。
     ///
-    /// 返回是否真的移动了。**由装配层在主窗口 `Moved` / `Resized` 时调用**，
-    /// 事件驱动、没有定时器。
+    /// 返回**它现在占的矩形**（装配层拿它累积成"已经排上的窗口"再传给下一个，
+    /// 堆叠就是这么串起来的）；`None` 表示这次没有参与排列（没吸附、正在被
+    /// 用户拖、或拿不到工作区），那它也就不该挡住别人。
+    ///
+    /// **由装配层在主窗口 `Moved` / `Resized` 时调用**，事件驱动、没有定时器。
     ///
     /// 三种情况直接不动：
     /// * 没吸附（用户拖走过，或者手动关掉了吸附）；
@@ -305,25 +308,39 @@ impl Popout {
     ///
     /// 位置没变时也直接返回：主窗口移动会连发很多条 `WM_MOVE`，
     /// 每次都调一遍 `SetWindowPos` 是没必要的系统调用。
-    pub fn follow_dock(&mut self, main: Rect, work: Option<Rect>) -> bool {
+    pub fn follow_dock(
+        &mut self,
+        main: Rect,
+        work: Option<Rect>,
+        occupied: &[Rect],
+    ) -> Option<Rect> {
         if !self.docked || self.drag_start.is_some() {
-            return false;
+            return None;
         }
+        // 当前位置：优先用本程序上次摆出去的那个（不产生 syscall）。
+        // 只有它还不知道时才问一次窗口 —— 正常情况下创建时就填好了。
+        let current = self.last_pos.or_else(|| Some(self.window.position()));
         let req = DockRequest {
             main,
             size: self.phys,
             side: self.dock_side,
             work,
+            current,
+            occupied,
         };
         let Some(d) = dock::dock_position(&req) else {
-            return false;
+            return None;
         };
-        if self.last_pos == Some((d.x, d.y)) {
-            return false;
+        if self.last_pos != Some((d.x, d.y)) {
+            self.window.move_to(d.x, d.y);
+            self.last_pos = Some((d.x, d.y));
         }
-        self.window.move_to(d.x, d.y);
-        self.last_pos = Some((d.x, d.y));
-        true
+        Some(Rect {
+            x: d.x,
+            y: d.y,
+            w: self.phys.0.max(1),
+            h: self.phys.1.max(1),
+        })
     }
 
     /// 用户拖完 / 缩放完松手了。
@@ -398,6 +415,22 @@ impl Popout {
     /// 连显示器工作区都不必查）。
     pub fn is_docked(&self) -> bool {
         self.docked
+    }
+
+    /// 这个窗口**现在占的矩形**（屏幕物理像素）。
+    ///
+    /// 创建新弹窗时装配层拿它凑"别人占了哪"，好让新窗口避开它们（堆叠）。
+    /// 用 `last_pos` 而不是问窗口：这是"每多开一个窗口就多一次 syscall"的位置，
+    /// 而创建时几何一定填过 `last_pos`、之后每次程序摆位也都会更新它。
+    /// 万一是 `None`（理论上只在几何里没给坐标时出现），才退回问一次窗口。
+    pub fn occupied_rect(&self) -> Rect {
+        let (x, y) = self.last_pos.unwrap_or_else(|| self.window.position());
+        Rect {
+            x,
+            y,
+            w: self.phys.0.max(1),
+            h: self.phys.1.max(1),
+        }
     }
 
     /// 装配层换了主窗口配色。**只有"跟随主窗口"的窗口要动。**

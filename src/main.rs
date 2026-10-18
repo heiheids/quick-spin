@@ -633,6 +633,10 @@ fn selftest() -> ExitCode {
                 size,
                 side,
                 work: w,
+                // 这一块测的是"单窗口"的规则（空链、没有当前位置），
+                // 于是它的期望值与加堆叠之前完全一致 —— 正好当回归基线用。
+                current: None,
+                occupied: &[],
             })
         };
 
@@ -741,6 +745,168 @@ fn selftest() -> ExitCode {
             "吸附跟随   : {}",
             if failures.is_empty() {
                 "右吸附 / 右放不下翻左 / 左放不下翻右 / 两侧都放不下夹紧 / 垂直夹紧 / 移动跟随 / 超宽不 panic / 无工作区不摆 —— 全部通过（逐项比对期望值）".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // 吸附**堆叠**：多个弹窗一起吸附时不能重叠。
+    //
+    // 使用者实测报障的正是这一条："多个窗口一起吸附会重叠在一起" —— 那时
+    // `dock_position` 对每个窗口都算同一个位置（贴主窗口右边缘、上边对齐），
+    // 计算里没有"那一侧已经站了别人"这个概念。所以这一块的第一条断言就是
+    // **两个窗口的坐标必须不同**，那是那个 bug 的直接反例。
+    //
+    // 仍然是纯几何：喂进"已占用的矩形"，比较"算出来的落位"。
+    {
+        use platform::window::Rect;
+        use popout::dock::{DockRequest, dock_position};
+        use popout::state::DockSide;
+
+        let work = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let size = (320, 420);
+        let mut failures: Vec<String> = Vec::new();
+
+        // 右吸附链上第 n 个的期望坐标：x 恒为 500（= 100+400），y 依次相接。
+        let hi = |x: i32, y: i32| Rect {
+            x,
+            y,
+            w: size.0,
+            h: size.1,
+        };
+
+        let place = |main: Rect, side: DockSide, occupied: &[Rect]| {
+            dock_position(&DockRequest {
+                main,
+                size,
+                side,
+                work: Some(work),
+                // 用期望侧（不靠"当前中心"推断），这样每条断言只考一件事。
+                current: None,
+                occupied,
+            })
+        };
+
+        // ---- 1. 空链时与加堆叠之前完全一致（回归基线）----
+        let main = Rect {
+            x: 100,
+            y: 100,
+            w: 400,
+            h: 800,
+        };
+        match place(main, DockSide::Right, &[]) {
+            Some(d) if (d.x, d.y) == (500, 100) => {}
+            other => failures.push(format!("空链时应为 (500,100)，实为 {other:?}")),
+        }
+
+        // ---- 2. 两个窗口：坐标必须不同，且首尾相接 ----
+        let first = hi(500, 100);
+        match place(main, DockSide::Right, &[first]) {
+            Some(d) if (d.x, d.y) == (500, 520) => {}
+            // 520 = 100 + 420（上一个的下边缘）
+            other => failures.push(format!("第二个应接在 (500,520)，实为 {other:?}")),
+        }
+
+        // ---- 3. 三个窗口：依次向下相接 ----
+        let second = hi(500, 520);
+        match place(main, DockSide::Right, &[first, second]) {
+            // 100 + 420*2 = 940，而 940+420=1360 > 1080 → 这一列排满
+            Some(d) if (d.x, d.y) == (820, 100) => {}
+            // 820 = 500 + 320：另起一列，贴在第一列外侧，再从主窗口上边缘开始
+            other => failures.push(format!("第一列排满应另起一列 (820,100)，实为 {other:?}")),
+        }
+
+        // ---- 4. 回填空位：把链上中间那个移走，后来的应补进去 ----
+        match place(main, DockSide::Right, &[first, hi(820, 100)]) {
+            Some(d) if (d.x, d.y) == (500, 520) => {}
+            other => failures.push(format!("应回填空位 (500,520)，实为 {other:?}")),
+        }
+
+        // ---- 5. 左吸附是镜像的 ----
+        let main_left = Rect {
+            x: 900,
+            y: 100,
+            w: 400,
+            h: 800,
+        };
+        let l_first = hi(580, 100); // 900 - 320 = 580
+        match place(main_left, DockSide::Left, &[l_first]) {
+            Some(d) if (d.x, d.y) == (580, 520) => {}
+            other => failures.push(format!("左吸附第二个应为 (580,520)，实为 {other:?}")),
+        }
+
+        // ---- 6. 宽窄不一的窗口 ----
+        // 链上有一个 500 宽（比自己宽）、且占满整列的窗口。自己的第一个槽位
+        // 被它挡住，往下也放不下 → 只能落到它**外侧**：列间距取了两者较宽的
+        // 那个，所以 x 不会压进它。
+        let wide = Rect {
+            x: 500,
+            y: 100,
+            w: 500,
+            h: 800,
+        };
+        match place(main, DockSide::Right, &[wide]) {
+            Some(d) if d.x >= wide.right() => {}
+            other => failures.push(format!("整列被宽窗口占满时应落到它外侧，实为 {other:?}")),
+        }
+        // 同一个宽窗口只占上半段时，应当接在它**下方**（而不是另起一列）
+        let wide_top = Rect {
+            x: 500,
+            y: 100,
+            w: 500,
+            h: 400,
+        };
+        match place(main, DockSide::Right, &[wide_top]) {
+            Some(d) if (d.x, d.y) == (500, 500) => {}
+            other => failures.push(format!("应接在宽窗口下方 (500,500)，实为 {other:?}")),
+        }
+
+        // ---- 7. 排不下时的退化：不越界、不 panic ----
+        // 主窗口比工作区还宽 → 两侧都放不下 → 保持侧别并夹进工作区。
+        let huge_main = Rect {
+            x: -500,
+            y: 100,
+            w: 3000,
+            h: 800,
+        };
+        match place(huge_main, DockSide::Right, &[]) {
+            Some(d)
+                if d.x >= work.x
+                    && d.x + size.0 <= work.right()
+                    && d.y >= work.y
+                    && d.y + size.1 <= work.bottom() => {}
+            other => failures.push(format!("排不下时应夹进工作区，实为 {other:?}")),
+        }
+        // 工作区被切得比窗口还矮（竖排任务栏 / 极窄屏）：同样不许 panic
+        let tiny_work = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 100,
+        };
+        if dock_position(&DockRequest {
+            main,
+            size,
+            side: DockSide::Right,
+            work: Some(tiny_work),
+            current: None,
+            occupied: &[],
+        })
+        .is_none()
+        {
+            failures.push("工作区比窗口还矮时不该没有结果".to_string());
+        }
+
+        selftest_line!(
+            "吸附堆叠   : {}",
+            if failures.is_empty() {
+                "两个不相撞且相接 / 三个依次相接 / 一列排满另起一列 / 回填空位 / 左吸附镜像 / 宽窄不一不压邻列 / 排不下仍夹进工作区且不 panic —— 全部通过（逐项比对期望值）".to_string()
             } else {
                 format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
             }

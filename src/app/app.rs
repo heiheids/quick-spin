@@ -1622,6 +1622,19 @@ impl App {
         }
     }
 
+    /// 当前**已经吸附着**的弹窗矩形。
+    ///
+    /// 创建新弹窗时用它算落位（堆叠要避开别人）。刻意用 `last_pos` 而不是问
+    /// 每个窗口的实际位置：那是 syscall，而这里是"每多开一个窗口就多一次"。
+    /// `last_pos` 在创建时由几何填好、之后每次程序摆位都会更新，够用。
+    fn docked_rects(&self) -> Vec<crate::platform::window::Rect> {
+        self.popouts
+            .values()
+            .filter(|p| p.is_docked())
+            .map(|p| p.occupied_rect())
+            .collect()
+    }
+
     /// 吸附位；拿不到显示器工作区时退化成"贴主窗口右边、顶部对齐"。
     ///
     /// 退化值刻意**仍然贴着主窗口**：那是没有工作区信息时最可能正确的猜测，
@@ -1632,12 +1645,16 @@ impl App {
         work: Option<crate::platform::window::Rect>,
         size: (i32, i32),
         side: crate::popout::state::DockSide,
+        occupied: &[crate::platform::window::Rect],
     ) -> (i32, i32) {
         let req = crate::popout::dock::DockRequest {
             main,
             size,
             side,
             work,
+            // 创建时它还没有位置，"该吸哪一侧"只能按记录里的意图。
+            current: None,
+            occupied,
         };
         match crate::popout::dock::dock_position(&req) {
             Some(d) => (d.x, d.y),
@@ -1649,6 +1666,15 @@ impl App {
     ///
     /// 由主窗口的 `Moved` / `Resized` 驱动：**事件驱动，没有轮询定时器**
     ///（`WM_MOVE` 在用户拖动时是每帧来的，所以看起来是连续跟随）。
+    ///
+    /// ## 堆叠：一趟走完，边摆边累积
+    ///
+    /// 每摆好一个就把它占的矩形收进 `placed`，下一个再算时就能避开它 ——
+    /// 链就是这么串起来的，而**拖走留下的空位会被自然回填**（下一个来找槽位时
+    /// 那里已经不相交了）。顺序取自 `BTreeMap` 的键序，稳定，不会来回抖。
+    ///
+    /// 这样也不必先扫一遍"别人的矩形"：每个窗口算的时候，排在自己前面的
+    /// 已经就位，排在自己后面的还没轮到 —— 自己不会挡自己。
     fn follow_popouts(&mut self) {
         // **主窗口最小化时不能跟随。**
         //
@@ -1666,8 +1692,13 @@ impl App {
         }
         let main = self.main_rect();
         let work = crate::platform::window::work_area(self.window.hwnd());
+        // 一次分配、按窗口数预留；不做 syscall（用各窗口记着的位置）。
+        let mut placed: Vec<crate::platform::window::Rect> =
+            Vec::with_capacity(self.popouts.len());
         for p in self.popouts.values_mut() {
-            p.follow_dock(main, work);
+            if let Some(r) = p.follow_dock(main, work, &placed) {
+                placed.push(r);
+            }
         }
     }
 
@@ -1852,14 +1883,17 @@ impl App {
         );
         let main = self.main_rect();
         let work = crate::platform::window::work_area(self.window.hwnd());
+        // 已经吸附着的那些窗口占在哪 —— 新窗口要避开它们（堆叠）。
+        // 在这里算一次：两条分支都要用。
+        let occupied = self.docked_rects();
         let (x, y) = match (saved.docked, saved.x, saved.y) {
             // 吸附中：位置由主窗口推导，记录里那份自由位置已经不作数
-            (true, ..) => self.dock_here(main, work, (dw, dh), saved.dock_side),
+            (true, ..) => self.dock_here(main, work, (dw, dh), saved.dock_side, &occupied),
             // 自由位置：用记下来的
             (false, Some(x), Some(y)) => (x, y),
             // 没吸附、却也从来没有过位置（手改过状态文件）→ 退回吸附位，
             // 而不是把窗口丢到屏幕左上角
-            (false, _, _) => self.dock_here(main, work, (dw, dh), saved.dock_side),
+            (false, _, _) => self.dock_here(main, work, (dw, dh), saved.dock_side, &occupied),
         };
 
         let geometry = crate::platform::window::Geometry {
