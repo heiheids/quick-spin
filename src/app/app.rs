@@ -1021,6 +1021,14 @@ impl App {
         self.icon_requests.saturating_sub(before)
     }
 
+    /// 自检用：返回 `(失败待重试的图标数, 已放弃的图标数)`。
+    ///
+    /// 后者才是"有图标永远出不来"的判据；前者只是"失败过一次、还会再试"，
+    /// 属于正常波动（启动时 shell 可能还没就绪）。
+    pub fn selftest_icon_failures(&self) -> (usize, usize) {
+        (self.loader.failing(), self.loader.blocked())
+    }
+
     /// 自检用：模拟一次"空白处框选拖动"，返回 `(移动次数, 其中请求了重绘的次数)`。
     ///
     /// 这条判定直接对应"选框流畅不流畅"：拖动期间**每一次移动都必须请求重绘**，
@@ -2076,13 +2084,21 @@ impl App {
         if !loaded.is_empty() {
             let ctx = self.renderer.context();
             for item in loaded {
-                if let Ok(bitmap) = item.result {
-                    if let Err(e) = self.icons.insert(ctx, item.key, &bitmap) {
-                        eprintln!("图标转位图失败: {e}");
+                match item.result {
+                    Ok(bitmap) => {
+                        if let Err(e) = self.icons.insert(ctx, item.key, &bitmap) {
+                            eprintln!("图标转位图失败: {e}");
+                        }
                     }
+                    // 提取失败（文件没了、路径无图标）：方格画占位底色，
+                    // 但**留一条日志** —— 否则用户看到"某个图标空着"时，
+                    // 我们没有任何线索知道是哪一条、为什么。
+                    // 只在失败时写，正常路径不受影响。
+                    Err(e) => diag(&format!(
+                        "图标提取失败: {} — {e}",
+                        item.key.path.display()
+                    )),
                 }
-                // 提取失败（文件没了、路径无图标）就静默跳过：
-                // 方格画占位底色，不值得为每个坏图标刷一行日志。
             }
         }
 

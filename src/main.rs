@@ -460,12 +460,17 @@ fn selftest() -> ExitCode {
         // 非 0 且随帧数增长 ⇒ 有图标永远提取不成功，而每帧都在重试，
         // 加载线程会一直做白工（拖动时的卡顿就是这么来的）。
         let re = app.selftest_icon_rerequests(10, 30);
+        println!("图标请求   : 30 帧内发起 {re} 次（含首次请求，不代表异常）");
+
+        // 真正的判据：有多少图标**试满次数后放弃**了。
+        // 那才是"某个方格永远没有图标"，需要定位。
+        let (failing, blocked) = app.selftest_icon_failures();
         println!(
-            "图标重复请求: {re} 次 / 30 帧{}",
-            if re == 0 {
+            "图标失败   : 待重试 {failing} 个 / 已放弃 {blocked} 个{}",
+            if blocked == 0 {
                 "（正常：没有永远提取不成功的图标）"
             } else {
-                "  ⚠ 有图标每帧都在重试！加载线程会一直做白工"
+                "  ⚠ 有方格会一直是空的！看 诊断.log 里的『图标提取失败』行"
             }
         );
 
