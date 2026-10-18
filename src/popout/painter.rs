@@ -15,11 +15,12 @@ use crate::platform::hittest::RectI;
 use crate::popout::layout::TitleButton;
 use crate::popout::layout::{PopoutLayout, TITLE_BUTTONS};
 
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::*;
 
 use crate::config::theme::Scheme;
 use crate::error::{Result, Win32Ext};
+use crate::popout::icons::Item;
 use crate::render::{Role, TextEngine};
 
 use crate::render::painters::{rounded_i, to_d2d};
@@ -180,10 +181,6 @@ pub fn clover_colors() -> [(u8, u8, u8); 4] {
 ///
 /// 与其他绘制器同样的形状：一把白色笔刷，靠 `SetColor` 改色复用。
 /// 每个窗口一份（弹出窗口自给自足，见 `mod.rs` 的选择 A）。
-///
-/// **临时的 `allow(dead_code)`**：绘制器已就绪，但构造它的 `window.rs`
-/// 还没写（下一步）。等 `window.rs` 落地后请删掉下面这行。
-#[allow(dead_code)]
 pub struct PopoutPainter {
     brush: Option<ID2D1SolidColorBrush>,
 }
@@ -210,11 +207,10 @@ impl PopoutPainter {
         Ok(())
     }
 
-    /// 画一帧：面板底 + 标题栏 + 四个图标 + 内容方格 + 标题文字。
+    /// 画一帧：面板底 + 标题栏 + 四个图标 + 内容（方格 + 真图标 + 名称）+ 标题文字。
     ///
-    /// `names` 是要显示的条目名（与主窗口该选项卡的可见条目同步）。
-    /// 这一版画**占位方格 + 名称**，不画图标 —— 图标需要它自己的加载线程与
-    /// 缓存，单独一步做。先把"同步"这件事本身做对。
+    /// `items` 是要显示的条目（与主窗口该选项卡的可见条目同步），
+    /// `icons` 是它们对应的位图，缺失的位置是 `None`（还没加载好）。
     pub fn draw(
         &self,
         ctx: &ID2D1DeviceContext,
@@ -223,7 +219,8 @@ impl PopoutPainter {
         scheme: &Scheme,
         title: &str,
         hover: Option<TitleButton>,
-        names: &[String],
+        items: &[Item],
+        icons: &[Option<ID2D1Bitmap1>],
     ) -> Result<()> {
         let Some(brush) = &self.brush else {
             return Ok(());
@@ -242,22 +239,44 @@ impl PopoutPainter {
             brush.SetColor(&to_d2d(scheme.panel.to));
             ctx.FillRectangle(&rect_to_d2d(layout.title_bar), brush);
 
-            // ---- 内容方格（占位：只有底色与名称）----
+            // ---- 内容：方格底色 + 真图标 ----
+            //
+            // 方格底色有两个作用，所以**总是**画：它既是"整格的框"
+            //（与主窗口的方格观感一致），也是图标还没加载好时的占位。
+            // 图标到了就叠在上面 —— 不会出现"一会儿有一会儿没有"的闪。
             //
             // 数量与顺序来自主窗口推来的快照，所以两边必须一致 ——
             // 这正是"弹出只是多了一种显示方式"的可见证据。
+            let visible = layout.visible_tiles(items.len());
             let row_h = layout.row_height();
-            for i in 0..names.len() {
+            for i in 0..visible {
                 let (tx, ty) = layout.tile_at(i, row_h);
-                // 超出内容区的行先不画（滚动是后续的事）
-                if ty + row_h > layout.content.y + layout.content.h {
-                    break;
-                }
                 brush.SetColor(&to_d2d(scheme.tile_bg));
                 ctx.FillRoundedRectangle(
                     &rounded_i(RectI::new(tx, ty, layout.tile, layout.tile), 6.0),
                     brush,
                 );
+
+                if let Some(bitmap) = icons.get(i).and_then(|b| b.as_ref()) {
+                    // 目标矩形正好是方格。位图是按**物理像素**取的、绘制用 DIP，
+                    // 而 D2D 上下文的 DPI 已设成窗口 DPI，所以这里是 1:1，
+                    // 放大缩小时都不会发虚。位置与尺寸都取自布局，
+                    // 这里不做任何几何决策 —— 几何错了应该在布局的自检里暴露。
+                    let dest = D2D_RECT_F {
+                        left: tx as f32,
+                        top: ty as f32,
+                        right: (tx + layout.tile) as f32,
+                        bottom: (ty + layout.tile) as f32,
+                    };
+                    ctx.DrawBitmap(
+                        bitmap,
+                        Some(&dest),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        None,
+                        None,
+                    );
+                }
             }
 
             // ---- 四个图标 ----
@@ -301,17 +320,18 @@ impl PopoutPainter {
         }
 
         // ---- 名称（走文本引擎，需要 &mut）----
-        // 与方格一起画：先画完所有方块的底色，再统一排文字，
+        // 与方格分开两轮画：先画完所有方格的底色与图标，再统一排文字，
         // 避免"方块底色盖住上一个名称"。
+        //
+        // 可见格数用的是**同一个判据**（`visible_tiles`），所以名称与方格
+        // 永远一一对应 —— 两处各写一份就会出现"有方格没名字"这种错位。
+        let visible = layout.visible_tiles(items.len());
         let row_h = layout.row_height();
-        for (i, name) in names.iter().enumerate() {
+        for i in 0..visible {
             let (tx, ty) = layout.tile_at(i, row_h);
-            if ty + row_h > layout.content.y + layout.content.h {
-                break;
-            }
             text.draw(
                 ctx,
-                name,
+                &items[i].name,
                 Role::Caption,
                 (
                     tx as f32 - 4.0,

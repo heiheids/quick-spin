@@ -10,14 +10,16 @@ use std::sync::mpsc::{self, Receiver};
 use crate::config::model::{TabDef, TabOpen};
 use crate::config::theme::{Backdrop, Scheme};
 use crate::config::{self, AppConfig, SchemeBook};
+use crate::diag::log as diag;
 use crate::error::Result;
 use crate::i18n::I18n;
 use crate::model::Library;
 use crate::paths;
 use crate::platform::acrylic;
 use crate::platform::hittest::{HitTest, RectI};
-use crate::platform::icon_loader::{Key, Loader};
+use crate::platform::icon_loader::Loader;
 use crate::platform::window::{CloseAction, Event, Geometry, Handler, Window};
+use crate::popout::icons::{Content, IconSource, Item};
 use crate::render::composer::Composer;
 use crate::render::icon_cache::{DEFAULT_BUDGET as ICON_BUDGET, IconCache};
 use crate::render::painters::menu::{Menu, MenuCommand, MenuItem, MenuPainter, MenuTarget};
@@ -304,27 +306,9 @@ impl FrameStat {
 /// 阈值也不能太大：超过 4px 才承认拖拽的话，手稳的用户会以为拖拽坏了。
 const TILE_DRAG_THRESHOLD: i32 = 4;
 
-/// 诊断日志：**GUI 模式下没有控制台，`println!` 的输出会被直接丢掉**，
-/// 所以排查"卡在哪一步"必须写文件。记录相对进程启动的毫秒数，便于看间隔。
-///
-/// 只在动作路径上调用（启动、打开位置），每帧都调会拖慢绘制。
-fn diag(msg: &str) {
-    use std::io::Write;
-    use std::sync::OnceLock;
-    static T0: OnceLock<std::time::Instant> = OnceLock::new();
-    let t0 = T0.get_or_init(std::time::Instant::now);
-    let Ok(dir) = crate::paths::data_dir() else {
-        return;
-    };
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("诊断.log"))
-    else {
-        return;
-    };
-    let _ = writeln!(f, "[{:>7} ms] {msg}", t0.elapsed().as_millis());
-}
+/// 诊断日志见 [`crate::diag`]。这里用 `use ... as diag` 保留了原来的调用写法
+///（`diag(&format!(...))`），因为它在这份文件里出现了几十次，
+/// 全部改成 `crate::diag::log` 只会让动作路径的代码更难读。
 
 /// 由覆盖表键（`.lnk` 完整路径）推出默认显示名：文件名去掉 `.lnk`。
 ///
@@ -497,7 +481,15 @@ pub struct App {
     popouts: std::collections::BTreeMap<String, Box<crate::popout::window::Popout>>,
 
     /// 上次推给弹出子窗口时用的内容签名（见 `sync_popouts`）。
-    popout_sync_sig: (usize, usize, f32),
+    popout_sync_sig: (usize, usize, f32, u64),
+
+    /// 视图重算的版本号：`refresh_view` 每跑一次 +1。
+    ///
+    /// 存在的理由只有一个：给弹出窗口的同步判据提供**O(1) 但覆盖改名/重排**的
+    /// 依据。"条目数 / 扫描总数 / 图标尺寸"这三个数在改名、拖动排序、换图标时
+    /// 全都不变，于是弹出窗口会静静地停在旧内容上。这里用一个计数器把
+    /// "视图重算过"这件事本身变成可比较的量，比每帧去比对整张名称表便宜得多。
+    view_revision: u64,
 
     /// 右键菜单。`Some` 表示菜单正展开。
     ///
@@ -799,7 +791,8 @@ impl App {
             hover_settings_button: None,
             exit_requested: false,
             popouts: std::collections::BTreeMap::new(),
-            popout_sync_sig: (usize::MAX, usize::MAX, f32::MAX),
+            popout_sync_sig: (usize::MAX, usize::MAX, f32::MAX, u64::MAX),
+            view_revision: 0,
             menu: None,
             menu_hover: None,
             editing: None,
@@ -1296,6 +1289,10 @@ impl App {
 
     /// 按当前选项卡与搜索词重算可见条目，并同步布局。
     fn refresh_view(&mut self) {
+        // 视图重算过 → 版本号 +1。弹出窗口靠它发现"内容变了、但条目数没变"
+        // 的那些情况（改名、重排、换图标），见 `view_revision`。
+        self.view_revision = self.view_revision.wrapping_add(1);
+
         let Some(tab) = self.tabs.get(self.active_tab).cloned() else {
             // 选项卡不存在（配置被手改坏）时可见集合会变空，
             // 选中集必须跟着清 —— 否则菜单会对着一个空视图报
@@ -1495,11 +1492,14 @@ impl App {
     ///
     /// ## 触发判据
     ///
-    /// 用一个 O(1) 的签名（覆盖数 / 扫描总数 / 图标尺寸）守住，只有它变了才
-    /// 真的重算并推送。这样每帧检查的开销可忽略，也不会漏掉"加了一个图标"。
-    /// 签名覆盖不到的是**同名条目内部的改名与重排**——那两种情况下这三个数
-    /// 都不变。留着，是因为下一步接图标管线时本来就要换成更细的判据，
-    /// 而现在多算一份名称列表只为覆盖这两种情况，代价不成比例。
+    /// 用一个 O(1) 的签名（覆盖数 / 扫描总数 / 图标尺寸 / 视图版本号）守住，
+    /// 只有它变了才真的重算并推送。这样每帧检查的开销可忽略，
+    /// 也不会漏掉"加了一个图标"。
+    ///
+    /// 最后那一项是 `view_revision`（`refresh_view` 每次重算视图都会 +1）。
+    /// 前三个数在**同名条目的改名、拖动排序、更换图标**时全都不变 ——
+    /// 早期版本就是漏在这些情况上，弹出窗口会停在旧内容。用一个计数器
+    /// 把"视图重算过"变成可比较的量，比每帧比对整张名称表便宜得多。
     fn sync_popouts(&mut self) {
         if self.popouts.is_empty() {
             return;
@@ -1508,6 +1508,7 @@ impl App {
             self.state.get().entries.len(),
             self.library.total(),
             self.layout.icon_size,
+            self.view_revision,
         );
         if sig == self.popout_sync_sig {
             return;
@@ -1515,23 +1516,38 @@ impl App {
         self.popout_sync_sig = sig;
 
         let overrides = self.state.get().entries.clone();
+        let icon_size = self.layout.icon_size as i32;
         let keys: Vec<String> = self.popouts.keys().cloned().collect();
         for key in keys {
-            let names: Vec<String> = match self.tabs.iter().find(|t| t.key == key) {
-                Some(tab) => self
-                    .library
+            let content = match self.tabs.iter().find(|t| t.key == key) {
+                Some(tab) => {
                     // 搜索串传空：弹出窗口没有搜索框，显示的是该选项卡的**全部**
                     // 可见条目 —— 它与主窗口的差别只在于主窗口可能正被搜索过滤。
-                    .view(tab, "", &overrides)
-                    .into_iter()
-                    .filter_map(|i| self.library.get(i).map(|s| s.name.clone()))
-                    .collect(),
-                None => Vec::new(),
+                    let items = self
+                        .library
+                        .view(tab, "", &overrides)
+                        .into_iter()
+                        .filter_map(|i| {
+                            let shortcut = self.library.get(i)?;
+                            Some(Item {
+                                name: shortcut.name.clone(),
+                                // 图标来源与主窗口绘制用的是同一个函数，
+                                // 所以两个窗口的图标必然一致。
+                                source: self.icon_source(i)?,
+                            })
+                        })
+                        .collect();
+                    Content { icon_size, items }
+                }
+                None => Content {
+                    icon_size,
+                    items: Vec::new(),
+                },
             };
             let changed = self
                 .popouts
                 .get_mut(&key)
-                .map(|p| p.set_content(names))
+                .map(|p| p.set_content(content))
                 .unwrap_or(false);
             if changed {
                 if let Some(p) = self.popouts.get(&key) {
@@ -1618,7 +1634,7 @@ impl App {
                 //
                 // 根因是那个签名被当成了"所有窗口都已同步"的证据，
                 // 而它其实只说明"主窗口内容没有变化"。
-                self.popout_sync_sig = (usize::MAX, usize::MAX, f32::MAX);
+                self.popout_sync_sig = (usize::MAX, usize::MAX, f32::MAX, u64::MAX);
                 // 记下"开着"，下次启动自动恢复
                 let mut w = saved;
                 w.open = true;
@@ -1715,6 +1731,27 @@ impl App {
         self.rebuild_layout();
     }
 
+    /// 一个条目的图标来源：**"更换图标"优先，否则用 `.lnk` 本身按图标取**。
+    ///
+    /// 抽成一处是因为主窗口绘制与弹出窗口推送**必须**用同一个来源 ——
+    /// 两边各写一份的话，会出现"同一个条目在两个窗口里图标不一样"，
+    /// 而且这种不一致不会报错，只会让人怀疑自己看错了。
+    ///
+    /// 两种取法必须分开：自定义图标是图片，要按缩略图取；普通条目按图标取。
+    /// 混用会拿到"文件类型图标"，表现为"导入的图片看不到"。
+    fn icon_source(&self, index: usize) -> Option<IconSource> {
+        let shortcut = self.library.get(index)?;
+        let override_icon = self
+            .state
+            .get()
+            .entry(&crate::model::library::path_key(shortcut))
+            .icon;
+        Some(match override_icon {
+            Some(path) => IconSource::image(path),
+            None => IconSource::icon(shortcut.lnk_path.clone()),
+        })
+    }
+
     /// 取可见方格那一段的图标，缺的发起异步加载。
     ///
     /// 返回的 `Vec` 与 `layout.tiles` 一一对应；`None` 表示还没加载好。
@@ -1741,32 +1778,14 @@ impl App {
                 out.push(None);
                 continue;
             };
-            // 图标路径优先用覆盖表里的**图标覆盖**（"更换图标"的结果）。
-            // 不查覆盖的话，换了图标界面不会变。
-            //
-            // 两种取法必须分开：自定义图标是图片，要按缩略图取（`Key::image`）；
-            // 普通条目按图标取（`Key::new`）。混用会拿到"文件类型图标"，
-            // 表现为"导入的图片看不到"。
-            let override_icon = self
-                .state
-                .get()
-                .entry(&crate::model::library::path_key(
-                    self.library.get(index).unwrap(),
-                ))
-                .icon;
-            let (path, as_image) = match override_icon {
-                Some(icon) => (icon, true),
-                None => (
-                    self.library.get(index).unwrap().lnk_path.clone(),
-                    false,
-                ),
+            // 图标来源（"更换图标"优先，否则用 `.lnk` 本身）由 `icon_source` 统一算，
+            // 键的构造也收在 `IconSource::key` 里。弹出窗口推的是**同一份来源**、
+            // 走**同一个构造函数**，所以两个窗口的图标不可能不一致。
+            let Some(source) = self.icon_source(index) else {
+                out.push(None);
+                continue;
             };
-
-            let key = if as_image {
-                Key::image(path, pixel_size)
-            } else {
-                Key::new(path, pixel_size)
-            };
+            let key = source.key(pixel_size);
             match self.icons.get(&key) {
                 Some(bitmap) => out.push(Some(bitmap.clone())),
                 None => {

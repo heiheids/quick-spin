@@ -16,6 +16,7 @@
 
 mod app;
 mod config;
+mod diag;
 mod error;
 mod i18n;
 mod model;
@@ -754,6 +755,99 @@ fn selftest() -> ExitCode {
             "弹出窗图标 : {}",
             if failures.is_empty() {
                 "3 种尺寸下 4 个图标 全部落在各自按钮内 / 外形互不相同 / 叉左右对称 / 四叶草四色不同 —— 全部通过".to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // 弹出子窗口的图标管线。**只测与窗口无关的那部分**：键的构造与内容比较。
+    //
+    // 真正"创建第二个窗口 → 后台提取 → 转位图 → 画上去"那条路径自检走不到
+    //（前两轮的悬垂指针崩溃与"漏了 show()"两个 bug 就是这样漏过去的），
+    // 所以这里不声称验证了图标能画出来。能测死的是那条链路的**规则**：
+    // 尺寸换算错了、或者"按图"与"按图标"混用，图标会看起来不对而不报任何错。
+    {
+        use popout::icons::{Content, IconSource, Item, pixel_size};
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // 像素边长换算：与主窗口 `App::collect_icons` 同一条规则
+        //（DIP × 缩放系数，再夹到 16~256 物理像素）。
+        for (dip, dpi, want) in [
+            (128, 96.0, 128u32),
+            (128, 144.0, 192),
+            (128, 192.0, 256), // 上限
+            (8, 96.0, 16),     // 下限
+            (300, 96.0, 256),  // 上限
+            (48, 120.0, 60),
+        ] {
+            let got = pixel_size(dip, dpi);
+            if got != want {
+                failures.push(format!("{dip}DIP@{dpi} 缩放 → {got}px（应为 {want}）"));
+            }
+        }
+
+        // 键的三条性质。少任何一条都会有具体后果：
+        // * 同来源同尺寸必须相等 —— 否则每帧都被当成"还没加载"，无限重复请求；
+        // * 尺寸不同必须不等 —— 否则改图标大小后会拿旧分辨率的位图去画，发虚；
+        // * 按图 / 按图标必须分开 —— 否则用户"更换图标"选了图片也不生效。
+        let icon = IconSource::icon(r"C:\Windows\System32\notepad.exe");
+        let image = IconSource::image(r"C:\Windows\System32\notepad.exe");
+        if icon.key(128) != icon.key(128) {
+            failures.push("同来源同尺寸的键不相等".to_string());
+        }
+        if icon.key(128) == icon.key(256) {
+            failures.push("尺寸不同却得到同一个键".to_string());
+        }
+        if icon.key(128) == image.key(128) {
+            failures.push("按图与按图标得到同一个键".to_string());
+        }
+
+        // 内容比较：`set_content` 靠它决定"要不要重建键、要不要重绘"。
+        // 判错的方向有两个，两个都测：**该等的等不了**（白重建、白重绘），
+        // **该变的没变**（弹出窗口停在旧内容上）。
+        let items = vec![
+            Item {
+                name: "记事本".to_string(),
+                source: icon.clone(),
+            },
+            Item {
+                name: "画图".to_string(),
+                source: image.clone(),
+            },
+        ];
+        let base = Content {
+            icon_size: 48,
+            items: items.clone(),
+        };
+        let same = Content {
+            icon_size: 48,
+            items,
+        };
+        if base != same {
+            failures.push("同样的内容被判成不同（会反复重建键）".to_string());
+        }
+        let mut renamed = base.clone();
+        renamed.items[0].name = "另一个名字".to_string();
+        if renamed == base {
+            failures.push("改名没被察觉".to_string());
+        }
+        let mut resized = base.clone();
+        resized.icon_size = 96;
+        if resized == base {
+            failures.push("图标尺寸变化没被察觉".to_string());
+        }
+        let mut reordered = base.clone();
+        reordered.items.reverse();
+        if reordered == base {
+            failures.push("顺序变化没被察觉".to_string());
+        }
+
+        println!(
+            "弹出窗图标管线: {}",
+            if failures.is_empty() {
+                "像素换算 6 档 / 键同源相等、随尺寸变化、按图与按图标分开 / 内容比较（改名·重排·改尺寸）—— 全部通过".to_string()
             } else {
                 format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
             }

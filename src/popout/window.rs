@@ -1,14 +1,16 @@
 //! 弹出子窗口的窗口本体。
 //!
 //! 每个弹出窗口持有一整套自己的东西：`Window`（HWND）、`Renderer`（交换链）、
-//! `PopoutPainter`、`TextEngine`、布局与配色。**不借用主窗口的任何运行时状态**
-//!（见 `mod.rs` 的选择 A），所以两层之间没有 `RefCell`、没有共享可变状态，
-//! 也没有 `&mut` 别名问题。
+//! `PopoutPainter`、`TextEngine`、布局与配色，以及**自己的图标管线**
+//!（`PopoutIcons`：一条加载线程 + 一份位图缓存，见 `icons.rs`）。
+//! **不借用主窗口的任何运行时状态**（见 `mod.rs` 的选择 A），
+//! 所以两层之间没有 `RefCell`、没有共享可变状态，也没有 `&mut` 别名问题。
 
 use crate::config::theme::Scheme;
 use crate::error::Result;
 use crate::platform::hittest::HitTest;
 use crate::platform::window::{CloseAction, Event, Geometry, Handler, Window};
+use crate::popout::icons::{Content, PopoutIcons, pixel_size};
 use crate::popout::layout::{PopoutLayout, TitleButton};
 use crate::popout::painter::PopoutPainter;
 use crate::render::composer::Composer;
@@ -30,15 +32,14 @@ pub struct Popout {
     hover: Option<TitleButton>,
     /// 是否正在拖动窗口尺寸
     resizing: bool,
-    /// 要显示的条目名，与主窗口该选项卡的**可见条目**保持同步。
+    /// 要显示的条目，与主窗口该选项卡的**可见条目**保持同步。
     ///
     /// 需求："弹出窗口要同步它在主窗口的内容 —— 弹出只是多了一种显示方式，
     /// 并不影响本身在主窗口的内容。" 也就是说弹出**不把选项卡从侧栏拿走**，
     /// 它是同一份数据的第二个视图，数量与顺序必须和主窗口一致。
-    ///
-    /// 这一版先只同步**数量与名称**（画占位方格）：把"同步"这件事本身
-    /// 与图标管线解耦。数量对不上时问题在同步，不在图标，排查范围小一半。
-    content: Vec<String>,
+    content: Content,
+    /// 这个窗口自己的图标加载线程与位图缓存。
+    icons: PopoutIcons,
 }
 
 impl Popout {
@@ -55,18 +56,35 @@ impl Popout {
         let (renderer, composer) =
             Renderer::new(window.hwnd(), cw.max(1) as u32, ch.max(1) as u32, dpi as f32)?;
 
+        // 布局用**逻辑像素**：D2D 上下文的 DPI 已设成窗口 DPI，绘制时 DIP 会
+        // 自动变成物理像素，所以这一层只跟 DIP 打交道。
+        //（`client_size` 给的是物理像素，必须换算一次 —— 之前创建时直接拿物理
+        //  尺寸去算布局，而 `Resized` 那条路是换算过的，两条路不一致：
+        //  非 100% 缩放下刚创建出来的布局会整体偏大、右下角被裁掉一截。）
+        let (lw, lh) = logical_size(cw, ch, window.scale());
+        let layout = PopoutLayout::compute(lw, lh, icon_size);
+        // 图标管线自己一份（见 `icons.rs`）：加载线程要在这个窗口上唤醒重绘。
+        let icons = PopoutIcons::new(
+            window.redraw_notifier(),
+            pixel_size(layout.tile, dpi as f32),
+        );
+
         Ok(Self {
             window,
             renderer,
             composer,
             painter: PopoutPainter::new(),
             text: TextEngine::new()?,
-            layout: PopoutLayout::compute(cw, ch, icon_size),
+            layout,
             scheme,
             title: title.to_string(),
             hover: None,
             resizing: false,
-            content: Vec::new(),
+            content: Content {
+                icon_size,
+                items: Vec::new(),
+            },
+            icons,
         })
     }
 
@@ -74,12 +92,42 @@ impl Popout {
     ///
     /// 返回内容是否**真的**变了：调用方据此决定要不要请求重绘 ——
     /// 内容没变还每帧重绘弹出窗口是白耗电。
-    pub fn set_content(&mut self, names: Vec<String>) -> bool {
-        if self.content == names {
+    pub fn set_content(&mut self, content: Content) -> bool {
+        if self.content == content {
             return false;
         }
-        self.content = names;
+        // 图标尺寸变了（主窗口 `Ctrl+滚轮`）：方格边长必须跟着变，
+        // 否则图标与格子的关系会错位（图标比格子大一圈或小一圈）。
+        // 弹出窗口自己也有一份尺寸，只在创建时拿到过一次，所以必须一起推过来。
+        let icon_changed = self.content.icon_size != content.icon_size;
+        self.content = content;
+        // 内容换了 → 键表作废，下次绘制重建。
+        // **作废的是键，不是缓存**：已经落地并命中同一批键的位图仍留在缓存里，
+        // 不会因为换了个名字就把图标全部重新提取一遍。
+        self.icons.invalidate();
+        if icon_changed {
+            self.relayout(self.window.client_size());
+        }
         true
+    }
+
+    /// 按**物理**客户区尺寸重算布局（内部换算成 DIP），并同步图标请求边长。
+    ///
+    /// 这两件事必须一起做：请求的位图边长是从方格边长推出来的（1:1 绘制才清晰），
+    /// 分开改就会出现"格子变了、位图还是旧尺寸"，图标被拉伸或缩得发虚。
+    fn relayout(&mut self, phys: (i32, i32)) {
+        let (lw, lh) = logical_size(phys.0, phys.1, self.window.scale());
+        self.layout = PopoutLayout::compute(lw, lh, self.content.icon_size);
+        self.sync_icon_size();
+    }
+
+    /// 让图标管线的请求边长跟上当前的方格尺寸与窗口 DPI。
+    ///
+    /// 尺寸没变时它什么都不做（见 `PopoutIcons::set_pixel_size`），
+    /// 所以可以在拖动边框时每帧调用。
+    fn sync_icon_size(&mut self) {
+        let px = pixel_size(self.layout.tile, self.window.dpi() as f32);
+        self.icons.set_pixel_size(px);
     }
 
     /// 请求重绘一次（内容被推来后调用）。
@@ -139,6 +187,22 @@ impl Popout {
     }
 }
 
+/// 物理客户区尺寸 → 逻辑（DIP）尺寸。
+///
+/// 抽成一处是因为创建时、每次 `Resized`、每次 `DpiChanged` 都要做同一次换算。
+/// 三处各写一份的后果只在非 100% 缩放下才暴露，而且症状很隐蔽：
+/// 布局按物理算、绘制按 DIP 算，方格整体偏大、右下角被裁掉一截，
+/// 看起来像"布局算法错了"，其实是单位没统一。
+fn logical_size(phys_w: i32, phys_h: i32, scale: f32) -> (i32, i32) {
+    if scale <= 0.0 {
+        return (phys_w.max(1), phys_h.max(1));
+    }
+    (
+        (phys_w as f32 / scale).round() as i32,
+        (phys_h as f32 / scale).round() as i32,
+    )
+}
+
 impl Handler for Popout {
     fn on_event(&mut self, event: Event) -> bool {
         match event {
@@ -152,13 +216,22 @@ impl Handler for Popout {
                 {
                     return false;
                 }
-                let scale = self.window.scale();
-                let (lw, lh) = (
-                    (width as f32 / scale) as i32,
-                    (height as f32 / scale) as i32,
-                );
-                // 图标尺寸沿用当前布局的方格边长，避免尺寸一变方格就跳。
-                self.layout = PopoutLayout::compute(lw, lh, self.layout.tile);
+                // 布局用事件里的尺寸重算：`Resized` 带的就是物理像素，
+                // 而 DIP 换算统一在 `relayout` 里做。
+                //
+                // 图标尺寸取 `content.icon_size`（主窗口那侧的真值）而不是
+                // 上一次的方格边长：后者是被内容区宽度夹紧过的结果，
+                // 拿它当输入会让"窗口缩窄再放宽"之后方格回不到原尺寸。
+                self.relayout((width as i32, height as i32));
+                true
+            }
+            // DPI 变了（把窗口拖到另一块缩放不同的显示器上）。
+            //
+            // 两件事都要做：布局的 DIP 尺寸变了（物理客户区没变但缩放系数变了），
+            // 位图要按新的物理边长重新提取（键里带着尺寸，所以是另一批键）。
+            // `relayout` 一次把两件都做了。
+            Event::DpiChanged { .. } => {
+                self.relayout(self.window.client_size());
                 true
             }
             Event::SizeMove { entering } => {
@@ -223,7 +296,15 @@ impl Handler for Popout {
             return;
         }
         let ctx = self.renderer.context().clone();
+        // 收异步结果 → 转 D2D 位图 → 进缓存。**必须在绘制之前做完**：
+        // `insert` 会触发 LRU 淘汰，边画边淘汰可能把正要画的那张位图释放掉
+        //（主窗口 `App::draw` 里有同一条规则的说明）。
+        self.icons.poll_and_insert(&ctx);
         if self.painter.ensure(&ctx).is_ok() {
+            // 只给**看得见**的格子取图标：看不见的既不该请求、也不该占缓存。
+            // 判据与绘制共用 `visible_tiles`，两处不会算出不同的范围。
+            let visible = self.layout.visible_tiles(self.content.items.len());
+            let bitmaps = self.icons.collect(&self.content.items, visible);
             let _ = self.painter.draw(
                 &ctx,
                 &mut self.text,
@@ -231,7 +312,8 @@ impl Handler for Popout {
                 &self.scheme,
                 &self.title,
                 self.hover,
-                &self.content,
+                &self.content.items,
+                &bitmaps,
             );
         }
         let _ = self.renderer.end(if self.resizing { 0 } else { 1 });

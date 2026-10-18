@@ -174,4 +174,25 @@ impl PopoutLayout {
     pub const fn row_height(&self) -> i32 {
         self.tile + 16
     }
+
+    /// 内容区里**完整放得下**的格子数（不足一整行的部分不算）。
+    ///
+    /// 绘制与"该给哪几格取图标"共用这一个判据。两处各写一份的话，
+    /// 会出现"画了却没请求图标"（格子一直空着）或"请求了却不画"
+    /// （白提取，还占着缓存）—— 而且这两种症状都不会报错。
+    ///
+    /// 判据逐字对应绘制时的约束：整行（方格 + 名称行）的底边不超过内容区下边缘。
+    pub fn visible_tiles(&self, total: usize) -> usize {
+        let row_h = self.row_height();
+        let bottom = self.content.y + self.content.h;
+        let mut n = 0;
+        while n < total {
+            let (_, ty) = self.tile_at(n, row_h);
+            if ty + row_h > bottom {
+                break;
+            }
+            n += 1;
+        }
+        n
+    }
 }
