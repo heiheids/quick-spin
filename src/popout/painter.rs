@@ -15,7 +15,7 @@ use crate::platform::hittest::RectI;
 use crate::popout::layout::TitleButton;
 use crate::popout::layout::{PopoutLayout, TITLE_BUTTONS};
 
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::*;
 
 use crate::config::theme::Scheme;
@@ -82,10 +82,22 @@ pub fn glyph(button: TitleButton, r: RectI, on: bool) -> Vec<Glyph> {
             let d = h * 0.42;
             let rr = h * 0.46;
             vec![
-                Glyph::Disc { c: (cx - d, cy - d), r: rr },
-                Glyph::Disc { c: (cx + d, cy - d), r: rr },
-                Glyph::Disc { c: (cx - d, cy + d), r: rr },
-                Glyph::Disc { c: (cx + d, cy + d), r: rr },
+                Glyph::Disc {
+                    c: (cx - d, cy - d),
+                    r: rr,
+                },
+                Glyph::Disc {
+                    c: (cx + d, cy - d),
+                    r: rr,
+                },
+                Glyph::Disc {
+                    c: (cx - d, cy + d),
+                    r: rr,
+                },
+                Glyph::Disc {
+                    c: (cx + d, cy + d),
+                    r: rr,
+                },
             ]
         }
 
@@ -129,10 +141,7 @@ pub fn glyph(button: TitleButton, r: RectI, on: bool) -> Vec<Glyph> {
             let foot = (cx, cy + h * 0.62);
             let base_y = cy + h * 0.62;
             vec![
-                Glyph::Disc {
-                    c: head,
-                    r: head_r,
-                },
+                Glyph::Disc { c: head, r: head_r },
                 Glyph::Line {
                     a: (head.0, head.1 + head_r * 0.6),
                     b: foot,
@@ -535,12 +544,7 @@ impl PopoutPainter {
 
 /// 把一个矩形四边各内缩 `d`（结果为负宽高时夹到 0，不 panic）。
 fn inset(r: RectI, d: i32) -> RectI {
-    RectI::new(
-        r.x + d,
-        r.y + d,
-        (r.w - 2 * d).max(0),
-        (r.h - 2 * d).max(0),
-    )
+    RectI::new(r.x + d, r.y + d, (r.w - 2 * d).max(0), (r.h - 2 * d).max(0))
 }
 
 fn point(p: (f32, f32)) -> windows_numerics::Vector2 {

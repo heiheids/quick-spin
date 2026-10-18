@@ -42,8 +42,8 @@ impl CaptionPainter {
                 a: 1.0,
             };
             // SAFETY: COM 调用；white 是栈上局部量。
-            let brush = unsafe { ctx.CreateSolidColorBrush(&white, None) }
-                .ctx("CreateSolidColorBrush")?;
+            let brush =
+                unsafe { ctx.CreateSolidColorBrush(&white, None) }.ctx("CreateSolidColorBrush")?;
             self.brush = Some(brush);
         }
         Ok(())
@@ -74,9 +74,9 @@ impl CaptionPainter {
         unsafe {
             // 悬停底色：用强调色的弱化版本，和整机配色保持一致
             if hovered {
-                let fill: Color = scheme.accent_soft.with_alpha(
-                    (scheme.accent_soft.a() as f32 * opacity).round() as u8,
-                );
+                let fill: Color = scheme
+                    .accent_soft
+                    .with_alpha((scheme.accent_soft.a() as f32 * opacity).round() as u8);
                 brush.SetColor(&to_d2d(fill));
                 ctx.FillRoundedRectangle(&frame, brush);
             }

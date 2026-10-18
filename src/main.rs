@@ -80,7 +80,7 @@ fn main() -> ExitCode {
 ///（`quick-spin --diagnose | findstr ...`），覆盖成 `CONOUT$` 会把管道打断。
 fn prepare_console(cli: bool) {
     use windows::Win32::System::Console::{
-        AllocConsole, AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
+        ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE,
     };
 
     // SAFETY: 都是无参/常量入参的控制台 API；只影响本进程的标准句柄。
@@ -111,7 +111,7 @@ fn bind_std_handles(out_dev: &str, in_dev: &str) {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Console::{
-        SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
     };
 
     let open = |name: &str| {
@@ -343,16 +343,17 @@ fn icontest(path: Option<String>, size: Option<String>, dump: Option<String>) ->
             .map(|(_, p)| p.clone());
         match source {
             Some(src) => match platform::icon::extract(&src, size) {
-                Ok(icon) => match platform::icon::write_preview_png(&icon, std::path::Path::new(&out))
-                {
-                    Ok(()) => println!(
-                        "\n预览图已导出: {out}  (来源 {}，{}×{})",
-                        src.display(),
-                        icon.width,
-                        icon.height
-                    ),
-                    Err(e) => println!("\n预览图导出失败: {e}"),
-                },
+                Ok(icon) => {
+                    match platform::icon::write_preview_png(&icon, std::path::Path::new(&out)) {
+                        Ok(()) => println!(
+                            "\n预览图已导出: {out}  (来源 {}，{}×{})",
+                            src.display(),
+                            icon.width,
+                            icon.height
+                        ),
+                        Err(e) => println!("\n预览图导出失败: {e}"),
+                    }
+                }
                 Err(e) => println!("\n预览图来源提取失败: {e}"),
             },
             None => println!("\n没有可用的预览来源"),
@@ -372,14 +373,11 @@ fn icontest(path: Option<String>, size: Option<String>, dump: Option<String>) ->
 fn find_a_lnk() -> Option<std::path::PathBuf> {
     let mut roots = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
-        roots.push(
-            std::path::PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs"),
-        );
+        roots
+            .push(std::path::PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs"));
     }
     if let Ok(pd) = std::env::var("ProgramData") {
-        roots.push(
-            std::path::PathBuf::from(pd).join(r"Microsoft\Windows\Start Menu\Programs"),
-        );
+        roots.push(std::path::PathBuf::from(pd).join(r"Microsoft\Windows\Start Menu\Programs"));
     }
     if let Ok(up) = std::env::var("USERPROFILE") {
         roots.push(std::path::PathBuf::from(up).join("Desktop"));
@@ -408,8 +406,7 @@ fn find_a_lnk() -> Option<std::path::PathBuf> {
 /// "故意改坏 → 报出两条失败 → 退出码仍然是 0" —— 也就是说，凡是以退出码为判据
 /// 的人（脚本、CI、以及后来的我）都会把红的看成绿的。判据有两个来源必然会脱节，
 /// 所以让它只有一个来源：**输出由谁产生，成败就由谁登记**。
-static SELFTEST_WARNINGS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SELFTEST_WARNINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 macro_rules! selftest_line {
     ($($arg:tt)*) => {{
@@ -469,7 +466,9 @@ fn selftest() -> ExitCode {
     }
 
     match app.draw_once() {
-        Ok(()) => selftest_line!("绘制一帧   : 成功（BeginDraw → 面板/描边/发光/侧栏/网格 → EndDraw → Present）"),
+        Ok(()) => selftest_line!(
+            "绘制一帧   : 成功（BeginDraw → 面板/描边/发光/侧栏/网格 → EndDraw → Present）"
+        ),
         Err(e) => {
             eprintln!("绘制失败: {e}");
             return ExitCode::FAILURE;
@@ -600,8 +599,7 @@ fn selftest() -> ExitCode {
         }
 
         // retain_tabs：选项卡被删掉后，它的窗口状态必须能被清掉
-        let live: std::collections::HashSet<String> =
-            ["tab1".to_string()].into_iter().collect();
+        let live: std::collections::HashSet<String> = ["tab1".to_string()].into_iter().collect();
         let removed = ps.retain_tabs(&live);
         if removed != 2 || ps.windows.len() != 1 {
             failures.push("retain_tabs 清理数不对");
@@ -677,7 +675,9 @@ fn selftest() -> ExitCode {
         };
         match pos(at_right, DockSide::Right, Some(work)) {
             Some(d) if (d.x, d.y, d.side) == (1380, 100, DockSide::Left) => {}
-            other => failures.push(format!("右侧放不下应翻到左侧 (1380,100,Left)，实为 {other:?}")),
+            other => failures.push(format!(
+                "右侧放不下应翻到左侧 (1380,100,Left)，实为 {other:?}"
+            )),
         }
 
         // 左侧放不下 → 翻回右侧（期望左侧，但左边出界）
@@ -940,8 +940,8 @@ fn selftest() -> ExitCode {
     // 靠人眼撞是碰运气。
     {
         use config::theme::{BASE_PALETTE, palette_colors, palette_index};
-        use popout::palette::{PaletteLayout, follows_main, resolve_scheme};
         use platform::hittest::RectI;
+        use popout::palette::{PaletteLayout, follows_main, resolve_scheme};
 
         let mut failures: Vec<String> = Vec::new();
 
@@ -1066,7 +1066,10 @@ fn selftest() -> ExitCode {
         for (w, h) in [(60, 60), (120, 90), (1, 1), (4000, 4000)] {
             let tiny = PaletteLayout::compute(RectI::new(0, 0, w, h));
             if tiny.swatches.len() != colors.len() {
-                failures.push(format!("窗口 {w}×{h} 时色块数变了（{} 个）", tiny.swatches.len()));
+                failures.push(format!(
+                    "窗口 {w}×{h} 时色块数变了（{} 个）",
+                    tiny.swatches.len()
+                ));
             }
             if tiny.swatches.iter().any(|r| r.w <= 0 || r.h <= 0) {
                 failures.push(format!("窗口 {w}×{h} 时出现了零尺寸色块"));
@@ -1192,7 +1195,11 @@ fn selftest() -> ExitCode {
     // 主窗口标志：决定关闭主窗口时程序退不退出。    // 错了不会报错，只是关了窗口进程还在 —— 必须单独验。
     selftest_line!(
         "多窗口基础 : 主窗口标志 {}；活着的窗口 {} 个",
-        if app.selftest_main_window_flag() { "已置位" } else { "⚠ 未置位（关窗口将不退出）" },
+        if app.selftest_main_window_flag() {
+            "已置位"
+        } else {
+            "⚠ 未置位（关窗口将不退出）"
+        },
         app.selftest_live_window_count()
     );
 
@@ -1352,11 +1359,15 @@ fn selftest() -> ExitCode {
 
         // 3. 格间空隙不该命中任何一格
         //    取第 0 格的右边缘再往右 1px（仍在 TILE_GAP 里）
-        if l.tile_index_at(x0 + l.tile + 1, y0 + l.tile / 2, total).is_some() {
+        if l.tile_index_at(x0 + l.tile + 1, y0 + l.tile / 2, total)
+            .is_some()
+        {
             failures.push("格间空隙误命中".to_string());
         }
         //    行下沿再往下 1px（仍在行距里）
-        if l.tile_index_at(x0 + l.tile / 2, y0 + rh + 1, total).is_some() {
+        if l.tile_index_at(x0 + l.tile / 2, y0 + rh + 1, total)
+            .is_some()
+        {
             failures.push("行间空隙误命中".to_string());
         }
 
@@ -1369,7 +1380,9 @@ fn selftest() -> ExitCode {
             }
             let _ = TITLE_BUTTONS[i];
         }
-        if l.tile_index_at(l.title_text.x + 2, l.title_text.y + 2, total).is_some() {
+        if l.tile_index_at(l.title_text.x + 2, l.title_text.y + 2, total)
+            .is_some()
+        {
             failures.push("标题栏误命中方格".to_string());
         }
 
@@ -1377,7 +1390,9 @@ fn selftest() -> ExitCode {
         //    它若还能被点到，用户会点到一个看不见的东西并启动程序。
         if visible < total {
             let r = l.tile_at(visible, rh);
-            if l.tile_index_at(r.0 + l.tile / 2, r.1 + l.tile / 2, total).is_some() {
+            if l.tile_index_at(r.0 + l.tile / 2, r.1 + l.tile / 2, total)
+                .is_some()
+            {
                 failures.push("放不下的格子仍然能命中".to_string());
             }
         }
@@ -1389,13 +1404,18 @@ fn selftest() -> ExitCode {
             failures.push("只有一条时第 0 格命不中".to_string());
         }
         let r1 = l.tile_at(1, rh);
-        if l.tile_index_at(r1.0 + l.tile / 2, r1.1 + l.tile / 2, small).is_some() {
+        if l.tile_index_at(r1.0 + l.tile / 2, r1.1 + l.tile / 2, small)
+            .is_some()
+        {
             failures.push("只有一条时第 1 格仍然能命中".to_string());
         }
 
         // 7. 窗口小到只剩标题栏时，命中必须是 None 而不是 panic
         let tiny = PopoutLayout::compute(200, 40, 48);
-        if tiny.tile_index_at(mid((0, 0)).0, mid((0, 0)).1, total).is_some() {
+        if tiny
+            .tile_index_at(mid((0, 0)).0, mid((0, 0)).1, total)
+            .is_some()
+        {
             failures.push("极窄窗口仍然命中了方格".to_string());
         }
 
@@ -1463,7 +1483,10 @@ fn selftest() -> ExitCode {
             let close = l.buttons[3];
             let x = glyph(popout::layout::TitleButton::Close, close, false);
             if let (
-                [Glyph::Line { a: a0, b: b0, .. }, Glyph::Line { a: a1, b: b1, .. }],
+                [
+                    Glyph::Line { a: a0, b: b0, .. },
+                    Glyph::Line { a: a1, b: b1, .. },
+                ],
                 true,
             ) = (x.as_slice(), x.len() == 2)
             {
@@ -1768,7 +1791,11 @@ fn selftest() -> ExitCode {
                 let ok = (dw - cw).abs() <= 2.0 && (dh - ch).abs() <= 2.0;
                 selftest_line!(
                     "改尺寸({label}) : 窗口 {cw:.0}×{ch:.0} → 渲染器 {dw:.0}×{dh:.0}，面板 {pw:.0}×{ph:.0}{}",
-                    if ok { "" } else { "   ⚠ 渲染器未跟上窗口" }
+                    if ok {
+                        ""
+                    } else {
+                        "   ⚠ 渲染器未跟上窗口"
+                    }
                 );
                 if !ok {
                     selftest_line!("             ⚠ 交换链没有按新尺寸重建，内容会被裁切或留白");
@@ -1809,7 +1836,11 @@ fn selftest() -> ExitCode {
             let works = blur_a != blur_b;
             selftest_line!(
                 "设置面板   : 绘制成功；玻璃开关{}",
-                if works { "已接通系统层" } else { "⚠ 未生效" }
+                if works {
+                    "已接通系统层"
+                } else {
+                    "⚠ 未生效"
+                }
             );
             selftest_line!(
                 "             模糊 {} / 内缩 {:.0}px / 圆角 {:.0}px   →   模糊 {} / 内缩 {:.0}px / 圆角 {:.0}px",
@@ -2022,7 +2053,10 @@ fn diagnose() -> ExitCode {
     println!("状态文件   : {}", state_store.path().display());
     println!(
         "记住的窗口 : {}×{}   位置 {:?}   最大化 {}",
-        st.window.width, st.window.height, st.window.x.map(|x| (x, st.window.y)), st.window.maximized
+        st.window.width,
+        st.window.height,
+        st.window.x.map(|x| (x, st.window.y)),
+        st.window.maximized
     );
     println!(
         "界面语言   : {}（可选 {} 种）",
@@ -2055,14 +2089,15 @@ fn diagnose() -> ExitCode {
     // 而且不报任何错。打出来一眼就能确认。
     println!(
         "  交互态   : 悬停 0x{:08X} / 选项卡悬停 0x{:08X} / 选中 0x{:08X} / 强调整色 0x{:08X}",
-        scheme.tile_hover.0,
-        scheme.tab_hover.0,
-        scheme.tile_active.0,
-        scheme.accent_soft.0
+        scheme.tile_hover.0, scheme.tab_hover.0, scheme.tile_active.0, scheme.accent_soft.0
     );
     println!("  可选方案 :");
     for (key, name) in schemes.listing() {
-        let mark = if key == cfg.appearance.scheme { "●" } else { "○" };
+        let mark = if key == cfg.appearance.scheme {
+            "●"
+        } else {
+            "○"
+        };
         println!("    {mark} {key:<14} {name}");
     }
 

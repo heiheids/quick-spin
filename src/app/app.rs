@@ -26,7 +26,7 @@ use crate::render::painters::menu::{Menu, MenuCommand, MenuItem, MenuPainter, Me
 use crate::render::painters::{
     CaptionPainter, GridPainter, PanelPainter, SettingsItem, SettingsPainter, SidebarPainter,
 };
-use crate::render::{Role, Renderer, TextEngine};
+use crate::render::{Renderer, Role, TextEngine};
 use crate::shell::com::ComGuard;
 use crate::shell::scan::ScanReport;
 use crate::state::{self, StateStore};
@@ -621,9 +621,7 @@ impl App {
             )
         };
 
-        let always_on_top = saved
-            .always_on_top
-            .unwrap_or(cfg.general.always_on_top);
+        let always_on_top = saved.always_on_top.unwrap_or(cfg.general.always_on_top);
         let outer_glass = saved.outer_glass.unwrap_or(cfg.appearance.outer_glass);
 
         let window = Window::create(
@@ -926,7 +924,12 @@ impl App {
         self.draw()?;
 
         let (dw, dh) = self.renderer.dip_size();
-        Ok((dw, dh, self.layout.panel.2 - self.layout.panel.0, self.layout.panel.3 - self.layout.panel.1))
+        Ok((
+            dw,
+            dh,
+            self.layout.panel.2 - self.layout.panel.0,
+            self.layout.panel.3 - self.layout.panel.1,
+        ))
     }
 
     /// 自检用：打开设置面板画一帧，验证该绘制路径。
@@ -1079,9 +1082,7 @@ impl App {
     pub fn selftest_marquee_redraws(&mut self, steps: usize) -> (usize, usize) {
         let scale = self.window.scale();
         // 逻辑坐标 → 物理坐标（`on_mouse_*` 收的是物理坐标）
-        let phys = |lx: i32, ly: i32| {
-            (((lx as f32) * scale) as i32, ((ly as f32) * scale) as i32)
-        };
+        let phys = |lx: i32, ly: i32| (((lx as f32) * scale) as i32, ((ly as f32) * scale) as i32);
 
         // 起点取内容区左下角的空白处：方格从上往下填，那里通常没有方格。
         let content = self.layout.content;
@@ -1693,8 +1694,7 @@ impl App {
         let main = self.main_rect();
         let work = crate::platform::window::work_area(self.window.hwnd());
         // 一次分配、按窗口数预留；不做 syscall（用各窗口记着的位置）。
-        let mut placed: Vec<crate::platform::window::Rect> =
-            Vec::with_capacity(self.popouts.len());
+        let mut placed: Vec<crate::platform::window::Rect> = Vec::with_capacity(self.popouts.len());
         for p in self.popouts.values_mut() {
             if let Some(r) = p.follow_dock(main, work, &placed) {
                 placed.push(r);
@@ -1791,9 +1791,7 @@ impl App {
                                 // 从来没读过别名，连关掉重开都还是旧名字
                                 //（推送的内容本身就是旧的，与同步机制无关）。
                                 // 主窗口绘制用的是别名，所以表现是"两个窗口叫两个名字"。
-                                name: crate::model::library::display_name(
-                                    shortcut, &overrides,
-                                ),
+                                name: crate::model::library::display_name(shortcut, &overrides),
                                 // 图标来源与主窗口绘制用的是同一个函数，
                                 // 所以两个窗口的图标必然一致。
                                 source: self.icon_source(i)?,
@@ -2654,9 +2652,7 @@ impl App {
         if cw > 0 && ch > 0 {
             let (rw, rh) = self.renderer.pixel_size();
             if cw as u32 != rw || ch as u32 != rh {
-                eprintln!(
-                    "[resize] 尺寸不一致: 窗口 {cw}x{ch} vs 交换链 {rw}x{rh}，已自动重建"
-                );
+                eprintln!("[resize] 尺寸不一致: 窗口 {cw}x{ch} vs 交换链 {rw}x{rh}，已自动重建");
                 self.on_resized(cw as u32, ch as u32);
             }
         }
@@ -2685,10 +2681,7 @@ impl App {
                     // 但**留一条日志** —— 否则用户看到"某个图标空着"时，
                     // 我们没有任何线索知道是哪一条、为什么。
                     // 只在失败时写，正常路径不受影响。
-                    Err(e) => diag(&format!(
-                        "图标提取失败: {} — {e}",
-                        item.key.path.display()
-                    )),
+                    Err(e) => diag(&format!("图标提取失败: {} — {e}", item.key.path.display())),
                 }
             }
         }
@@ -2769,10 +2762,9 @@ impl App {
             .skip(first)
             .take(self.layout.tiles.len())
             .map(|&i| {
-                self.library.get(i).is_some_and(|s| {
-                    self.selected
-                        .contains(&crate::model::library::path_key(s))
-                })
+                self.library
+                    .get(i)
+                    .is_some_and(|s| self.selected.contains(&crate::model::library::path_key(s)))
             })
             .collect();
 
@@ -2912,7 +2904,10 @@ impl App {
                 } else if self.cfg.general.hotkey.trim().is_empty() {
                     format!("{}：未设置", self.strings.setting_hotkey)
                 } else {
-                    format!("{}：{}", self.strings.setting_hotkey, self.cfg.general.hotkey)
+                    format!(
+                        "{}：{}",
+                        self.strings.setting_hotkey, self.cfg.general.hotkey
+                    )
                 };
                 let items = [
                     SettingsItem {
@@ -2955,7 +2950,8 @@ impl App {
                 // 判据同样只有一处（`theme::palette_index`），
                 // 弹窗的选色浮层用的是它 —— 否则会出现"同一个颜色在一个窗口里
                 // 高亮、在另一个里不高亮"。
-                let current_swatch = crate::config::theme::palette_index(&self.cfg.appearance.base_color);
+                let current_swatch =
+                    crate::config::theme::palette_index(&self.cfg.appearance.base_color);
                 self.settings.draw(
                     self.renderer.context(),
                     &mut self.text,
@@ -3008,8 +3004,7 @@ impl App {
 
         // 拖动尺寸期间不等垂直同步：模态尺寸循环里每帧阻塞一个刷新周期
         // 会让拖动明显发涩。此时画面在快速变化，撕裂根本看不出来。
-        self.renderer
-            .end(if self.resizing { 0 } else { 1 })?;
+        self.renderer.end(if self.resizing { 0 } else { 1 })?;
         self.composer.commit()?;
         Ok(())
     }
@@ -3321,12 +3316,7 @@ impl App {
 
     /// 弹出菜单：统一在这里加捕获，避免每个调用点各写一次。
     fn open_menu(&mut self, target: MenuTarget, items: Vec<MenuItem>, anchor: (i32, i32)) {
-        self.menu = Some(Menu::new(
-            target,
-            items,
-            anchor,
-            self.logical_window_rect(),
-        ));
+        self.menu = Some(Menu::new(target, items, anchor, self.logical_window_rect()));
         self.window.set_capture(true);
     }
 
@@ -3534,8 +3524,7 @@ impl App {
 
         // 主界面 = 清掉分组，回到按来源归属
         items.push(
-            MenuItem::new(AssignGroup(None), "主界面".to_string())
-                .checked(current.is_none()),
+            MenuItem::new(AssignGroup(None), "主界面".to_string()).checked(current.is_none()),
         );
         items
     }
@@ -3754,12 +3743,9 @@ impl App {
             .collect();
 
         items.extend(
-            APP_SHORTCUTS
-                .iter()
-                .enumerate()
-                .map(|(i, (name, _, _))| {
-                    MenuItem::new(MenuCommand::AddApp(i), (*name).to_string())
-                }),
+            APP_SHORTCUTS.iter().enumerate().map(|(i, (name, _, _))| {
+                MenuItem::new(MenuCommand::AddApp(i), (*name).to_string())
+            }),
         );
 
         // "网址"放最后：它需要用户再输入一次，是这一组里唯一有后续交互的。
@@ -3802,9 +3788,7 @@ impl App {
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
                     .join("explorer.exe");
-                if let Err(e) =
-                    crate::shell::lnk::create_link(&dest, &explorer, &target, name)
-                {
+                if let Err(e) = crate::shell::lnk::create_link(&dest, &explorer, &target, name) {
                     eprintln!("创建「{name}」快捷方式失败: {e}");
                     return false;
                 }

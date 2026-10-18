@@ -163,4 +163,3 @@ pub struct PaletteView<'a> {
     pub hover_swatch: Option<usize>,
     pub hover_follow: bool,
 }
-

@@ -18,7 +18,7 @@ pub use sidebar::SidebarPainter;
 // 菜单类型不在这里 re-export：它还没接到 App 上，
 // 提前导出只会产生"未使用导入"的噪声。接线时按需要引入即可。
 
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
 
 use crate::config::theme::Color;

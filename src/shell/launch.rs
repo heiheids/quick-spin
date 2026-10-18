@@ -25,12 +25,7 @@ const SHELL_ERROR_MAX: isize = 32;
 
 /// 打开一个快捷方式，或任意可执行项、文档、URL。
 pub fn open(target: &Path) -> Result<()> {
-    execute(
-        target.as_os_str(),
-        "open",
-        None,
-        None,
-    )
+    execute(target.as_os_str(), "open", None, None)
 }
 
 /// 用系统默认浏览器打开一个网址。
@@ -97,7 +92,12 @@ pub fn reveal(path: &Path) -> Result<()> {
 }
 
 /// 统一的 `ShellExecuteW` 调用外壳。
-fn execute(file: &OsStr, operation: &str, params: Option<&str>, work_dir: Option<&OsStr>) -> Result<()> {
+fn execute(
+    file: &OsStr,
+    operation: &str,
+    params: Option<&str>,
+    work_dir: Option<&OsStr>,
+) -> Result<()> {
     let file_w = to_wide(file);
     let op_w = to_wide(OsStr::new(operation));
     let params_w = params.map(|p| to_wide(OsStr::new(p)));
@@ -112,7 +112,9 @@ fn execute(file: &OsStr, operation: &str, params: Option<&str>, work_dir: Option
             params_w
                 .as_ref()
                 .map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr())),
-            dir_w.as_ref().map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr())),
+            dir_w
+                .as_ref()
+                .map_or(PCWSTR::null(), |v| PCWSTR(v.as_ptr())),
             SW_SHOWNORMAL,
         )
     };

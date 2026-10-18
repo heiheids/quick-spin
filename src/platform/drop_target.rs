@@ -34,7 +34,9 @@ use windows::Win32::Foundation::{HWND, POINTL};
 // 这些类型分散在四个模块里，是照 crate 实际定义确认过的：
 // `STGMEDIUM`/`IDataObject` 在 Com，`IDropTarget`/`DROPEFFECT`/`ReleaseStgMedium`
 // 在 Ole，`MODIFIERKEYS_FLAGS` 在 SystemServices，`ITEMIDLIST` 在 Shell::Common。
-use windows::Win32::System::Com::{CoTaskMemFree, DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL};
+use windows::Win32::System::Com::{
+    CoTaskMemFree, DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL,
+};
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{
@@ -111,12 +113,14 @@ impl IDropTarget_Impl for ShellDropTarget_Impl {
         _pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let accepts = pdataobj
-            .as_ref()
-            .is_some_and(|obj| has_shell_idlist(obj));
+        let accepts = pdataobj.as_ref().is_some_and(|obj| has_shell_idlist(obj));
         // SAFETY: 调用方（OLE）保证这个指针有效。
         unsafe {
-            *pdweffect = if accepts { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+            *pdweffect = if accepts {
+                DROPEFFECT_COPY
+            } else {
+                DROPEFFECT_NONE
+            };
         }
         Ok(())
     }
@@ -183,7 +187,11 @@ impl IDropTarget_Impl for ShellDropTarget_Impl {
 
         // SAFETY: 调用方保证指针有效。
         unsafe {
-            *pdweffect = if done > 0 { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+            *pdweffect = if done > 0 {
+                DROPEFFECT_COPY
+            } else {
+                DROPEFFECT_NONE
+            };
         }
         Ok(())
     }

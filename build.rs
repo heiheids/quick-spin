@@ -47,10 +47,7 @@ fn main() {
     //    否则 `C:\Windows` 里的 `\W` 会被当成转义序列。
     let ico_rel = Path::new("assets/app.ico");
     if !ico_rel.is_file() {
-        println!(
-            "cargo:warning=找不到 {}，跳过图标资源",
-            ico_rel.display()
-        );
+        println!("cargo:warning=找不到 {}，跳过图标资源", ico_rel.display());
         return;
     }
     let cwd = std::env::current_dir().unwrap_or_default();

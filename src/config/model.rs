@@ -387,6 +387,10 @@ impl TabDef {
         // 先试 tab.<key>，命中不了再退回 key 本身
         let keyed = format!("tab.{}", self.key);
         let text = tr(&keyed);
-        if text == keyed { self.key.clone() } else { text }
+        if text == keyed {
+            self.key.clone()
+        } else {
+            text
+        }
     }
 }

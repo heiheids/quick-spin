@@ -12,7 +12,7 @@
 //! 真实图标提取尚未接入，图标方块先画成一个带底色的圆角方块。
 //! 图标到位后把位图画进这个方块即可，布局与命中测试都不需要改。
 
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::*;
 use windows_numerics::Vector2;
 
@@ -94,9 +94,9 @@ impl SidebarPainter {
             // 的矩形 —— 左侧两个圆角正好与面板重合，右侧两个被裁掉，右上角落在标题栏
             // 分界处也看不出来。D2D 的圆角矩形只支持统一半径，做不出"只有左下角圆"，
             // 所以只能靠裁剪配合。
-            let bg = scheme.sidebar_bg.with_alpha(
-                (scheme.sidebar_bg.a() as f32 * opacity).round() as u8,
-            );
+            let bg = scheme
+                .sidebar_bg
+                .with_alpha((scheme.sidebar_bg.a() as f32 * opacity).round() as u8);
             brush.SetColor(&to_d2d(bg));
 
             let sidebar = layout.sidebar;
@@ -113,15 +113,7 @@ impl SidebarPainter {
 
             // 右边界和上边界故意画到裁剪区之外，让那两对圆角被裁掉
             let (pl, pt, _, pb) = layout.panel;
-            let fill = rounded(
-                (
-                    pl,
-                    pt,
-                    pl + sidebar.w as f32 + 400.0,
-                    pb,
-                ),
-                layout.radius,
-            );
+            let fill = rounded((pl, pt, pl + sidebar.w as f32 + 400.0, pb), layout.radius);
             ctx.FillRoundedRectangle(&fill, brush);
 
             ctx.PopAxisAlignedClip();
@@ -176,9 +168,10 @@ impl SidebarPainter {
                     // 原来拿的是 `tab_label`（文字色）—— 边框和文字共用颜色，
                     // 在交界处就多出一种无关的颜色。统一之后，
                     // 选中与未选中的差别只体现在**线的粗细和透明度**上，而不是色相。
-                    let edge = scheme.border.from.with_alpha(
-                        (scheme.border.from.a() as f32 * opacity * 0.55).round() as u8,
-                    );
+                    let edge = scheme
+                        .border
+                        .from
+                        .with_alpha((scheme.border.from.a() as f32 * opacity * 0.55).round() as u8);
                     brush.SetColor(&to_d2d(edge));
                     ctx.DrawRoundedRectangle(&frame, brush, 1.0, no_style);
                 }
@@ -268,10 +261,7 @@ impl SidebarPainter {
     ) -> Result<()> {
         let rect = layout.settings_button;
         let radius = rect.w as f32 / 2.0;
-        let center = (
-            rect.x as f32 + radius,
-            rect.y as f32 + radius,
-        );
+        let center = (rect.x as f32 + radius, rect.y as f32 + radius);
         let no_style: Option<&ID2D1StrokeStyle> = None;
 
         // SAFETY: COM 调用；结构体都是本函数栈上的局部量。

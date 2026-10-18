@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
+    D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, ID2D1Bitmap1, ID2D1DeviceContext,
@@ -76,12 +76,7 @@ impl IconCache {
     }
 
     /// 把提取好的像素转成 D2D 位图并存入缓存。
-    pub fn insert(
-        &mut self,
-        ctx: &ID2D1DeviceContext,
-        key: Key,
-        icon: &IconBitmap,
-    ) -> Result<()> {
+    pub fn insert(&mut self, ctx: &ID2D1DeviceContext, key: Key, icon: &IconBitmap) -> Result<()> {
         if self.entries.contains_key(&key) {
             return Ok(());
         }

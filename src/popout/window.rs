@@ -6,21 +6,21 @@
 //! **不借用主窗口的任何运行时状态**（见 `mod.rs` 的选择 A），
 //! 所以两层之间没有 `RefCell`、没有共享可变状态，也没有 `&mut` 别名问题。
 
+use crate::config::model::CornerStyle;
 use crate::config::theme::Scheme;
 use crate::error::Result;
+use crate::platform::acrylic;
 use crate::platform::hittest::HitTest;
 use crate::platform::window::{CloseAction, Event, Geometry, Handler, Rect, Window};
 use crate::popout::dock::{self, DockRequest};
-use crate::config::model::CornerStyle;
-use crate::platform::acrylic;
 use crate::popout::icons::{Content, PopoutIcons, pixel_size};
 use crate::popout::layout::{PopoutLayout, TitleButton};
 use crate::popout::painter::{ButtonStates, PopoutPainter};
 use crate::popout::palette::{self, PaletteLayout, PaletteText, PaletteView};
 use crate::popout::state::DockSide;
+use crate::render::TextEngine;
 use crate::render::composer::Composer;
 use crate::render::device::Renderer;
-use crate::render::TextEngine;
 
 /// "一次单击"允许的最大移动量（逻辑像素）。
 ///
@@ -191,8 +191,12 @@ impl Popout {
         acrylic::set_round_corners(window.hwnd(), corners.rounded);
         let (cw, ch) = window.client_size();
         let dpi = window.dpi();
-        let (renderer, composer) =
-            Renderer::new(window.hwnd(), cw.max(1) as u32, ch.max(1) as u32, dpi as f32)?;
+        let (renderer, composer) = Renderer::new(
+            window.hwnd(),
+            cw.max(1) as u32,
+            ch.max(1) as u32,
+            dpi as f32,
+        )?;
 
         // 布局用**逻辑像素**：D2D 上下文的 DPI 已设成窗口 DPI，绘制时 DIP 会
         // 自动变成物理像素，所以这一层只跟 DIP 打交道。
@@ -203,10 +207,7 @@ impl Popout {
         let layout = PopoutLayout::compute(lw, lh, icon_size);
         // 图标管线自己一份（见 `icons.rs`）：加载线程要在这个窗口上唤醒重绘。
         // 请求边长按 `icon_size` 算（与主窗口同一个来源），不是按算出来的方格边长。
-        let icons = PopoutIcons::new(
-            window.redraw_notifier(),
-            pixel_size(icon_size, dpi as f32),
-        );
+        let icons = PopoutIcons::new(window.redraw_notifier(), pixel_size(icon_size, dpi as f32));
 
         Ok(Self {
             window,
@@ -818,13 +819,13 @@ impl Handler for Popout {
                     // 点在方格（或它下面的名称）上：**先不启动**，
                     // 记下来等松手时再判断（判据见 `press` 与 `CLICK_TOLERANCE`）。
                     None => {
-                        self.press =
-                            self.layout
-                                .tile_index_at(lx, ly, self.content.items.len())
-                                .map(|index| TilePress {
-                                    index,
-                                    start: (lx, ly),
-                                });
+                        self.press = self
+                            .layout
+                            .tile_index_at(lx, ly, self.content.items.len())
+                            .map(|index| TilePress {
+                                index,
+                                start: (lx, ly),
+                            });
                         // 弹窗这边按下不改任何视觉状态（没有选中集、也没有按下态），
                         // 所以不必请求重绘。
                         false
@@ -847,11 +848,7 @@ impl Handler for Popout {
                     return false;
                 }
                 let (lx, ly) = self.to_logical(x, y);
-                if self
-                    .layout
-                    .tile_index_at(lx, ly, self.content.items.len())
-                    != Some(p.index)
-                {
+                if self.layout.tile_index_at(lx, ly, self.content.items.len()) != Some(p.index) {
                     return false;
                 }
                 if let Some(item) = self.content.items.get(p.index) {

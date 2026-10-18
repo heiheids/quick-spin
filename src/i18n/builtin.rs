@@ -110,7 +110,10 @@ pub const EN_US: Dict = &[
     // Status
     ("msg.scanning", "Scanning shortcuts…"),
     ("msg.empty", "No shortcuts here yet"),
-    ("msg.empty_hint", "Drop a shortcut here, or add a source folder in Settings"),
+    (
+        "msg.empty_hint",
+        "Drop a shortcut here, or add a source folder in Settings",
+    ),
     ("msg.target_missing", "Target file not found"),
     ("msg.load_failed", "Failed to load"),
     ("msg.no_result", "No matching results"),
@@ -156,7 +159,10 @@ pub const EN_US: Dict = &[
     ("settings.hide_after_launch", "Collapse panel after launch"),
     ("settings.single_instance", "Single instance only"),
     ("settings.show_tray", "Show tray icon"),
-    ("settings.hide_on_focus_lost", "Auto-hide when focus is lost"),
+    (
+        "settings.hide_on_focus_lost",
+        "Auto-hide when focus is lost",
+    ),
     ("settings.watch", "Watch source folders for changes"),
     ("settings.recursive", "Include subfolders"),
     ("settings.hotkey", "Toggle hotkey"),

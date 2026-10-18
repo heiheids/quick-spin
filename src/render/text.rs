@@ -106,8 +106,8 @@ pub struct TextEngine {
 impl TextEngine {
     pub fn new() -> Result<Self> {
         // SAFETY: 无参构造，返回接口由 self 持有。
-        let factory: IDWriteFactory =
-            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ctx("DWriteCreateFactory")?;
+        let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
+            .ctx("DWriteCreateFactory")?;
 
         Ok(Self {
             factory,
@@ -222,7 +222,10 @@ impl TextEngine {
 
             brush.SetColor(&to_d2d(color));
             ctx.DrawTextLayout(
-                Vector2 { X: rect.0, Y: rect.1 },
+                Vector2 {
+                    X: rect.0,
+                    Y: rect.1,
+                },
                 &layout,
                 &brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,

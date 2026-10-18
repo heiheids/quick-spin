@@ -81,11 +81,7 @@ pub enum MenuCommand {
 pub const APP_SHORTCUTS: &[(&str, &str, &str)] = &[
     ("记事本", "notepad.exe", ""),
     ("计算器", "calc.exe", ""),
-    (
-        "画图",
-        "",
-        "Microsoft.Paint_8wekyb3d8bbwe!App",
-    ),
+    ("画图", "", "Microsoft.Paint_8wekyb3d8bbwe!App"),
 ];
 
 /// "此电脑"的 CLSID 解析名。
@@ -415,10 +411,7 @@ impl MenuPainter {
                         let cx = row.x as f32 + CHECK_WIDTH as f32 / 2.0 + 2.0;
                         let cy = row.y as f32 + row.h as f32 / 2.0;
                         ctx.DrawLine(
-                            windows_numerics::Vector2 {
-                                X: cx - 4.0,
-                                Y: cy,
-                            },
+                            windows_numerics::Vector2 { X: cx - 4.0, Y: cy },
                             windows_numerics::Vector2 {
                                 X: cx - 1.0,
                                 Y: cy + 3.5,

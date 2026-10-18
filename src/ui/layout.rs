@@ -287,9 +287,7 @@ impl Layout {
         let text_right = desktop_x - TITLE_TEXT_RIGHT_GAP;
 
         // ---- 侧栏 ----
-        let sidebar_width = input
-            .sidebar_width
-            .clamp(64.0, (panel.2 - panel.0) * 0.4);
+        let sidebar_width = input.sidebar_width.clamp(64.0, (panel.2 - panel.0) * 0.4);
         let sidebar = RectI::new(
             panel.0 as i32,
             (panel.1 + TITLE_BAR as f32) as i32,
@@ -305,7 +303,12 @@ impl Layout {
         // 这个偏移与方格共用（见该常量的说明），保证两者始终同高。
         let mut y = sidebar.y + CONTENT_TOP_OFFSET;
         for _ in 0..tab_count {
-            tab_buttons.push(RectI::new(sidebar.x + TAB_SIDE_PADDING, y, button_w, button_h));
+            tab_buttons.push(RectI::new(
+                sidebar.x + TAB_SIDE_PADDING,
+                y,
+                button_w,
+                button_h,
+            ));
             y += button_h + TAB_GAP;
         }
 
@@ -363,18 +366,14 @@ impl Layout {
         // **不再做成正方形**。需求是"文字移到方格内部、紧贴图标、内边距固定 4px"，
         // 而名称行必须有高度 —— 方形就意味着宽度要跟着变高，
         // 那样内边距就不可能是固定 4px了。两者不可兼得，这里按新需求来。
-        let tile_h = TILE_PADDING
-            + input.icon_size as f32
-            + LABEL_GAP
-            + LABEL_HEIGHT
-            + TILE_PADDING;
+        let tile_h =
+            TILE_PADDING + input.icon_size as f32 + LABEL_GAP + LABEL_HEIGHT + TILE_PADDING;
         let pitch_y = tile_h + gap;
 
         // ---- 滚动 ----
         let total_rows = input.item_count.div_ceil(columns as usize);
         // 内容总高：末行不带间距
-        let content_height = total_rows as f32 * tile_h
-            + total_rows.saturating_sub(1) as f32 * gap;
+        let content_height = total_rows as f32 * tile_h + total_rows.saturating_sub(1) as f32 * gap;
         let max_scroll = (content_height - usable_h).max(0.0);
         let scroll = input.scroll.clamp(0.0, max_scroll);
 
@@ -425,7 +424,12 @@ impl Layout {
         } else if (avail - SETTINGS_BTN_GAP * 2) / 3 >= SETTINGS_BTN_W_MID {
             (SETTINGS_BTN_GAP, SETTINGS_BTN_W_MID, SETTINGS_BTN_H, 1)
         } else if (avail - SETTINGS_BTN_GAP_MIN * 2) / 3 >= SETTINGS_BTN_W_MIN {
-            (SETTINGS_BTN_GAP_MIN, SETTINGS_BTN_W_MIN, SETTINGS_BTN_H_MID, 2)
+            (
+                SETTINGS_BTN_GAP_MIN,
+                SETTINGS_BTN_W_MIN,
+                SETTINGS_BTN_H_MID,
+                2,
+            )
         } else {
             // 极窄：按可用宽度均分，用最小高度与最小字号。取 40 为绝对下限，
             // 再小就只是三个色块、点了也不知道是什么。
@@ -474,8 +478,7 @@ impl Layout {
         // 也要一起摊掉，否则整块会看着偏左。
         let used_cols = cols.min(count.max(1));
         let pitch = if used_cols > 1 {
-            ((row_width - SWATCH_SIZE * used_cols as i32) / (used_cols as i32 - 1))
-                .max(SWATCH_GAP)
+            ((row_width - SWATCH_SIZE * used_cols as i32) / (used_cols as i32 - 1)).max(SWATCH_GAP)
         } else {
             SWATCH_GAP
         };
@@ -502,7 +505,13 @@ impl Layout {
             minimize: RectI::new(minimize_x as i32, top as i32, button as i32, button as i32),
             close: RectI::new(close_x as i32, top as i32, button as i32, button as i32),
             add: RectI::new(add_x as i32, top as i32, button as i32, button as i32),
-            hide_desktop_icons: RectI::new(desktop_x as i32, top as i32, button as i32, button as i32),            sidebar,
+            hide_desktop_icons: RectI::new(
+                desktop_x as i32,
+                top as i32,
+                button as i32,
+                button as i32,
+            ),
+            sidebar,
             tab_buttons,
             settings_button,
             content,

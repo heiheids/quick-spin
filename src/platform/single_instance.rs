@@ -79,8 +79,10 @@ fn activate_existing() {
     let class = to_wide(WINDOW_CLASS);
     // SAFETY: 只做窗口查找与消息投递。
     unsafe {
-        if let Ok(hwnd) = FindWindowW(windows::core::PCWSTR(class.as_ptr()), windows::core::PCWSTR::null())
-        {
+        if let Ok(hwnd) = FindWindowW(
+            windows::core::PCWSTR(class.as_ptr()),
+            windows::core::PCWSTR::null(),
+        ) {
             if !hwnd.is_invalid() {
                 let _ = PostMessageW(Some(hwnd), SHOW_MESSAGE, WPARAM(0), LPARAM(0));
             }

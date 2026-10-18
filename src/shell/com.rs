@@ -11,7 +11,7 @@
 #![allow(dead_code)]
 
 use windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, COINIT, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
+    COINIT, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
 };
 
 use crate::error::{AppError, Result};

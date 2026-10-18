@@ -131,10 +131,7 @@ impl SettingsPainter {
             // 圆角同样跟着放大（14.0 → 15.2），否则四个角会露出内圈。
             let (px, py) = (panel.x as f32, panel.y as f32);
             let (pw, ph) = (panel.w as f32, panel.h as f32);
-            let outer = rounded(
-                (px - 1.2, py - 1.2, px + pw + 1.2, py + ph + 1.2),
-                15.2,
-            );
+            let outer = rounded((px - 1.2, py - 1.2, px + pw + 1.2, py + ph + 1.2), 15.2);
             brush.SetColor(&to_d2d(scheme.overlay_ring));
             ctx.DrawRoundedRectangle(&outer, brush, 1.2, no_style);
 
@@ -150,15 +147,27 @@ impl SettingsPainter {
             let cy = close.y as f32 + close.h as f32 / 2.0;
             let d = 5.0;
             ctx.DrawLine(
-                Vector2 { X: cx - d, Y: cy - d },
-                Vector2 { X: cx + d, Y: cy + d },
+                Vector2 {
+                    X: cx - d,
+                    Y: cy - d,
+                },
+                Vector2 {
+                    X: cx + d,
+                    Y: cy + d,
+                },
                 brush,
                 1.4,
                 no_style,
             );
             ctx.DrawLine(
-                Vector2 { X: cx - d, Y: cy + d },
-                Vector2 { X: cx + d, Y: cy - d },
+                Vector2 {
+                    X: cx - d,
+                    Y: cy + d,
+                },
+                Vector2 {
+                    X: cx + d,
+                    Y: cy - d,
+                },
                 brush,
                 1.4,
                 no_style,
@@ -201,38 +210,38 @@ impl SettingsPainter {
                 // 整段用 `show_toggle` 包住：配色方案那一行不是开关，
                 // 画了开关会让人以为它只能开/关，而它其实是换颜色。
                 if item.show_toggle {
-                let track_x = (row.x + row.w) as f32 - TRACK_W - 12.0;
-                let track_y = row.y as f32 + (row.h as f32 - TRACK_H) / 2.0;
-                let track = rounded(
-                    (track_x, track_y, track_x + TRACK_W, track_y + TRACK_H),
-                    TRACK_H / 2.0,
-                );
-                brush.SetColor(&to_d2d(if item.on {
-                    scheme.accent
-                } else {
-                    scheme.text_secondary.with_alpha(0x50)
-                }));
-                ctx.FillRoundedRectangle(&track, brush);
+                    let track_x = (row.x + row.w) as f32 - TRACK_W - 12.0;
+                    let track_y = row.y as f32 + (row.h as f32 - TRACK_H) / 2.0;
+                    let track = rounded(
+                        (track_x, track_y, track_x + TRACK_W, track_y + TRACK_H),
+                        TRACK_H / 2.0,
+                    );
+                    brush.SetColor(&to_d2d(if item.on {
+                        scheme.accent
+                    } else {
+                        scheme.text_secondary.with_alpha(0x50)
+                    }));
+                    ctx.FillRoundedRectangle(&track, brush);
 
-                // 圆钮
-                let knob_cx = if item.on {
-                    track_x + TRACK_W - TRACK_H / 2.0
-                } else {
-                    track_x + TRACK_H / 2.0
-                };
-                let knob_cy = track_y + TRACK_H / 2.0;
-                let knob_rect = crate::platform::hittest::RectI::new(
-                    (knob_cx - KNOB_R) as i32,
-                    (knob_cy - KNOB_R) as i32,
-                    (KNOB_R * 2.0) as i32,
-                    (KNOB_R * 2.0) as i32,
-                );
-                brush.SetColor(&to_d2d(if item.on {
-                    crate::config::theme::Color::WHITE
-                } else {
-                    scheme.text_secondary
-                }));
-                ctx.FillRoundedRectangle(&rounded_i(knob_rect, KNOB_R), brush);
+                    // 圆钮
+                    let knob_cx = if item.on {
+                        track_x + TRACK_W - TRACK_H / 2.0
+                    } else {
+                        track_x + TRACK_H / 2.0
+                    };
+                    let knob_cy = track_y + TRACK_H / 2.0;
+                    let knob_rect = crate::platform::hittest::RectI::new(
+                        (knob_cx - KNOB_R) as i32,
+                        (knob_cy - KNOB_R) as i32,
+                        (KNOB_R * 2.0) as i32,
+                        (KNOB_R * 2.0) as i32,
+                    );
+                    brush.SetColor(&to_d2d(if item.on {
+                        crate::config::theme::Color::WHITE
+                    } else {
+                        scheme.text_secondary
+                    }));
+                    ctx.FillRoundedRectangle(&rounded_i(knob_rect, KNOB_R), brush);
                 }
             }
         }
@@ -302,9 +311,9 @@ impl SettingsPainter {
         // 用的都是已有的居中角色，不新增 Role —— 角色一多，
         // "哪个字号该配哪个场景"就会散到各处。
         let role = match button_level {
-            0 | 1 => Role::Tab,     // 14.5px
-            2 => Role::Tile,        // 12.5px
-            _ => Role::Caption,     // 11.0px
+            0 | 1 => Role::Tab, // 14.5px
+            2 => Role::Tile,    // 12.5px
+            _ => Role::Caption, // 11.0px
         };
         for (i, rect) in layout.settings_buttons.iter().enumerate() {
             let Some(label) = button_labels.get(i) else {
@@ -324,7 +333,13 @@ impl SettingsPainter {
                 (row.w as f32 - TRACK_W - 40.0).max(20.0),
                 row.h as f32,
             );
-            text.draw(ctx, item.label, Role::Setting, label_rect, scheme.text_primary)?;
+            text.draw(
+                ctx,
+                item.label,
+                Role::Setting,
+                label_rect,
+                scheme.text_primary,
+            )?;
         }
 
         // 色板区标题，排在色块网格上方靠左。
@@ -338,13 +353,7 @@ impl SettingsPainter {
                 (panel.w as f32 - 32.0).max(20.0),
                 PALETTE_TITLE_OFFSET,
             );
-            text.draw(
-                ctx,
-                palette_title,
-                Role::Setting,
-                rect,
-                scheme.text_primary,
-            )?;
+            text.draw(ctx, palette_title, Role::Setting, rect, scheme.text_primary)?;
         }
 
         Ok(())

@@ -55,9 +55,7 @@ impl Library {
                     return false;
                 }
                 // 没有显式分组的一律算主窗口
-                let group = ov
-                    .and_then(|o| o.group.as_deref())
-                    .unwrap_or(MAIN_TAB);
+                let group = ov.and_then(|o| o.group.as_deref()).unwrap_or(MAIN_TAB);
                 group == tab.key
             })
             .filter(|(_, s)| {
@@ -68,8 +66,7 @@ impl Library {
                 // 按原名也应该还能搜到，否则会以为条目丢了
                 let ov = overrides.get(&path_key(s));
                 let alias = ov.and_then(|o| o.alias.as_deref()).unwrap_or("");
-                s.name.to_lowercase().contains(&needle)
-                    || alias.to_lowercase().contains(&needle)
+                s.name.to_lowercase().contains(&needle) || alias.to_lowercase().contains(&needle)
             })
             .map(|(i, _)| i)
             .collect();
@@ -95,11 +92,7 @@ impl Library {
     }
 
     /// 某个选项卡下的条目数。侧栏"有内容时无法删除"用它判断。
-    pub fn count_in(
-        &self,
-        tab: &TabDef,
-        overrides: &BTreeMap<String, EntryOverride>,
-    ) -> usize {
+    pub fn count_in(&self, tab: &TabDef, overrides: &BTreeMap<String, EntryOverride>) -> usize {
         self.view(tab, "", overrides).len()
     }
 
@@ -127,10 +120,7 @@ pub fn path_key(shortcut: &Shortcut) -> String {
 ///
 /// 两处各写一份的规则迟早会漂移，而漂移的表现是"同一个条目在两个窗口里
 /// 叫两个名字"这种没人会想到去查的差异。
-pub fn display_name(
-    shortcut: &Shortcut,
-    overrides: &BTreeMap<String, EntryOverride>,
-) -> String {
+pub fn display_name(shortcut: &Shortcut, overrides: &BTreeMap<String, EntryOverride>) -> String {
     overrides
         .get(&path_key(shortcut))
         .and_then(|o| o.alias.clone())

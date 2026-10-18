@@ -64,7 +64,15 @@ pub fn scan(sources: &Sources) -> Result<ScanReport> {
     let mut seen: HashSet<String> = HashSet::new();
 
     for (root, origin) in collect_roots(sources) {
-        walk(&root, origin, sources.recursive, 0, &resolver, &mut seen, &mut report);
+        walk(
+            &root,
+            origin,
+            sources.recursive,
+            0,
+            &resolver,
+            &mut seen,
+            &mut report,
+        );
     }
 
     report.items.sort_by_key(|s| s.name.to_lowercase());
@@ -77,7 +85,12 @@ fn collect_roots(sources: &Sources) -> Vec<(PathBuf, Origin)> {
     let mut roots = Vec::new();
 
     if sources.user_start_menu {
-        push_known(&mut roots, &FOLDERID_Programs, Origin::UserStartMenu, "用户开始菜单");
+        push_known(
+            &mut roots,
+            &FOLDERID_Programs,
+            Origin::UserStartMenu,
+            "用户开始菜单",
+        );
     }
     if sources.common_start_menu {
         push_known(
@@ -88,7 +101,12 @@ fn collect_roots(sources: &Sources) -> Vec<(PathBuf, Origin)> {
         );
     }
     if sources.user_desktop {
-        push_known(&mut roots, &FOLDERID_Desktop, Origin::UserDesktop, "用户桌面");
+        push_known(
+            &mut roots,
+            &FOLDERID_Desktop,
+            Origin::UserDesktop,
+            "用户桌面",
+        );
     }
     if sources.public_desktop {
         push_known(

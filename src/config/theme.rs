@@ -224,7 +224,9 @@ impl Scheme {
         // 暗底用半透明白做叠加色，亮底必须用半透明黑 ——
         // 白底上叠白是什么都看不出来的。
         let dark_panel = base.luminance() < 0.5;
-        s.sidebar_bg = base.darken(0.25).with_alpha(if dark_panel { 0x40 } else { 0x20 });
+        s.sidebar_bg = base
+            .darken(0.25)
+            .with_alpha(if dark_panel { 0x40 } else { 0x20 });
 
         if dark_panel {
             s.title_text = Color::new(0xFF, 0xF0, 0xF4, 0xFA);
@@ -284,7 +286,10 @@ impl Scheme {
         // 提亮方向对深色底和浅色底都成立：深色底提亮、浅色底变淡，
         // 两种都是需求里的"变淡"，所以不需要按底色亮度分两套。
         let hover_white = Color::new(0xFF, 0xFF, 0xFF, 0xFF);
-        self.tile_hover = self.tile_bg.with_alpha(HOVER_ALPHA).mix_toward(hover_white, 0.90);
+        self.tile_hover = self
+            .tile_bg
+            .with_alpha(HOVER_ALPHA)
+            .mix_toward(hover_white, 0.90);
         self.tile_active = self.tile_bg.mix_toward(self.accent, 0.55);
         self.accent_soft = self.accent.with_alpha(self.accent.a() / 3);
         // 选项卡走同一条规则，只是基色换成 `hover_base` ——
@@ -293,7 +298,10 @@ impl Scheme {
         //
         // 选项卡的选中态不用这个色（它有自己的 active 底色与描边），
         // 所以悬停和选中不会互相干扰。
-        self.tab_hover = self.hover_base.with_alpha(HOVER_ALPHA).mix_toward(hover_white, 0.90);
+        self.tab_hover = self
+            .hover_base
+            .with_alpha(HOVER_ALPHA)
+            .mix_toward(hover_white, 0.90);
 
         // 浮层外圈的描边：**直接取方格悬停高亮的颜色**。
         //
@@ -323,7 +331,11 @@ impl Scheme {
         // 要达成的目的始终是"和面板拉开差距"，"更深"只是达成它的手段之一；
         // 把手段当成规则，就会在深色底上得到一条看不见的边框。
         // 强调色仍然不参与：混了会把色相带走，边框就不再是"同色系"了。
-        let panel_base = self.panel.from.mix_toward(self.panel.to, 0.5).with_alpha(255);
+        let panel_base = self
+            .panel
+            .from
+            .mix_toward(self.panel.to, 0.5)
+            .with_alpha(255);
         let edge = if panel_base.luminance() < 0.5 {
             panel_base.lighten(0.35)
         } else {
@@ -574,7 +586,10 @@ pub const BASE_PALETTE_COLS: usize = 8;
 /// 解析不了的项**跳过而不是补默认色**：补了会让格子数与布局错位，
 /// 表现是"点 A 却选中了 B"。
 pub fn palette_colors() -> Vec<Color> {
-    BASE_PALETTE.iter().filter_map(|h| Color::from_hex(h)).collect()
+    BASE_PALETTE
+        .iter()
+        .filter_map(|h| Color::from_hex(h))
+        .collect()
 }
 
 /// 基础色对应色板里的第几格。`None` = 不是色板里的颜色（含"跟随主窗口"的空串）。

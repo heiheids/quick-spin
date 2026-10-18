@@ -73,15 +73,15 @@ impl Hit {
     /// 转成 `WM_NCHITTEST` 要返回的数值。
     pub const fn as_nchittest(self) -> isize {
         match self {
-            Self::Client => 1,      // HTCLIENT
-            Self::Caption => 2,     // HTCAPTION
-            Self::Left => 10,       // HTLEFT
-            Self::Right => 11,      // HTRIGHT
-            Self::Top => 12,        // HTTOP
-            Self::TopLeft => 13,    // HTTOPLEFT
-            Self::TopRight => 14,   // HTTOPRIGHT
-            Self::Bottom => 15,     // HTBOTTOM
-            Self::BottomLeft => 16, // HTBOTTOMLEFT
+            Self::Client => 1,       // HTCLIENT
+            Self::Caption => 2,      // HTCAPTION
+            Self::Left => 10,        // HTLEFT
+            Self::Right => 11,       // HTRIGHT
+            Self::Top => 12,         // HTTOP
+            Self::TopLeft => 13,     // HTTOPLEFT
+            Self::TopRight => 14,    // HTTOPRIGHT
+            Self::Bottom => 15,      // HTBOTTOM
+            Self::BottomLeft => 16,  // HTBOTTOMLEFT
             Self::BottomRight => 17, // HTBOTTOMRIGHT
         }
     }

@@ -147,9 +147,9 @@ pub fn taskbar_created_message() -> u32 {
     *CACHE.get_or_init(|| {
         // SAFETY: 传入以 NUL 结尾的静态宽字符串。
         unsafe {
-            windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(
-                windows::core::w!("TaskbarCreated"),
-            )
+            windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(windows::core::w!(
+                "TaskbarCreated"
+            ))
         }
     })
 }
@@ -178,7 +178,11 @@ pub fn show_context_menu(hwnd: HWND, window_visible: bool) -> Option<usize> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
 
-        let show_text = to_wide(if window_visible { "隐藏窗口" } else { "显示窗口" });
+        let show_text = to_wide(if window_visible {
+            "隐藏窗口"
+        } else {
+            "显示窗口"
+        });
         let show_cmd = if window_visible {
             command::HIDE
         } else {

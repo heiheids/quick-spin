@@ -297,9 +297,7 @@ fn read_dib_section(hbm: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<IconB
 }
 
 /// 退路：用 `GetDIBits` 读。位图不是 DIB section 时才会走到这里。
-fn read_via_get_dibits(
-    hbm: windows::Win32::Graphics::Gdi::HBITMAP,
-) -> Result<IconBitmap> {
+fn read_via_get_dibits(hbm: windows::Win32::Graphics::Gdi::HBITMAP) -> Result<IconBitmap> {
     // SAFETY: 整个函数体都是 GDI 调用；hdc 在末尾关闭。
     unsafe {
         let mut bmp = BITMAP::default();
@@ -444,7 +442,11 @@ pub fn write_preview_png(icon: &IconBitmap, path: &Path) -> std::io::Result<()> 
             let (sr, sg, sb) = if a == 0 {
                 (0, 0, 0)
             } else {
-                ((r * 255 / a).min(255), (g * 255 / a).min(255), (b * 255 / a).min(255))
+                (
+                    (r * 255 / a).min(255),
+                    (g * 255 / a).min(255),
+                    (b * 255 / a).min(255),
+                )
             };
 
             // 棋盘格：浅灰 / 深灰

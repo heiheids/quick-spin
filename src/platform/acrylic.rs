@@ -96,9 +96,7 @@ fn resolve_set_wca() -> Option<SetWcaFn> {
         unsafe {
             let module: HMODULE = GetModuleHandleW(w!("user32.dll")).ok()?;
             let proc: FARPROC = GetProcAddress(module, PCSTR(PROC_NAME.as_ptr()));
-            proc.map(|p| {
-                std::mem::transmute::<unsafe extern "system" fn() -> isize, SetWcaFn>(p)
-            })
+            proc.map(|p| std::mem::transmute::<unsafe extern "system" fn() -> isize, SetWcaFn>(p))
         }
     })
 }
@@ -213,7 +211,11 @@ fn set_system_backdrop(hwnd: HWND, kind: i32) -> bool {
 /// 调用点会变得看不出意图；把这一件事单独暴露出来最省事也最清楚。
 /// 主窗口仍然走 `apply`（它确实要材质 + 圆角一起设）。
 pub fn set_round_corners(hwnd: HWND, round: bool) {
-    let preference: i32 = if round { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+    let preference: i32 = if round {
+        DWMWCP_ROUND
+    } else {
+        DWMWCP_DONOTROUND
+    };
     // SAFETY: 传入的是本函数栈上 i32 的地址，长度参数与之一致。
     let _ = unsafe {
         DwmSetWindowAttribute(

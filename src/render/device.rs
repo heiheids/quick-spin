@@ -323,9 +323,7 @@ fn create_swap_chain(
     unsafe {
         let adapter = dxgi.GetAdapter().ctx("IDXGIDevice::GetAdapter")?;
         // GetParent 定义在 IDXGIObject 上，IDXGIAdapter 通过 Deref 继承
-        let factory: IDXGIFactory2 = adapter
-            .GetParent()
-            .ctx("IDXGIAdapter -> IDXGIFactory2")?;
+        let factory: IDXGIFactory2 = adapter.GetParent().ctx("IDXGIAdapter -> IDXGIFactory2")?;
 
         factory
             .CreateSwapChainForComposition(d3d, &desc, None::<&IDXGIOutput>)

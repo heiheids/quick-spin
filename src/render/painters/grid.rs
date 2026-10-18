@@ -4,17 +4,17 @@
 //! 本模块不认识快捷方式结构 —— 它只负责把给定的若干项摆到给定矩形里。
 //! 这样过滤逻辑变了不必动绘制代码。
 
-use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::Graphics::Direct2D::*;
 use windows_numerics::Vector2;
 
+use super::{rounded, rounded_i, to_d2d};
 use crate::config::theme::Scheme;
 use crate::error::{Result, Win32Ext};
 use crate::platform::hittest::RectI;
 use crate::render::{Role, TextEngine};
 use crate::ui::layout::{LABEL_GAP, LABEL_HEIGHT, Layout, TILE_PADDING};
-use super::{rounded, rounded_i, to_d2d};
 
 /// 方格圆角
 const TILE_RADIUS: f32 = 8.0;
@@ -145,8 +145,7 @@ impl GridPainter {
             if layout.max_scroll > 0.0 && layout.total_rows > 0 {
                 let track_top = layout.content.y as f32;
                 let track_height = (layout.content.h as f32).max(1.0);
-                let visible_ratio =
-                    layout.grid_rows as f32 / layout.total_rows as f32;
+                let visible_ratio = layout.grid_rows as f32 / layout.total_rows as f32;
 
                 let thumb_len = (track_height * visible_ratio)
                     .max(SCROLLBAR_MIN_LEN)
@@ -163,11 +162,9 @@ impl GridPainter {
                     - SCROLLBAR_RIGHT_MARGIN
                     - SCROLLBAR_WIDTH;
 
-                brush.SetColor(&to_d2d(
-                    scheme
-                        .text_secondary
-                        .with_alpha(((scheme.text_secondary.a() as f32) * 0.5 * opacity) as u8),
-                ));
+                brush.SetColor(&to_d2d(scheme.text_secondary.with_alpha(
+                    ((scheme.text_secondary.a() as f32) * 0.5 * opacity) as u8,
+                )));
                 let thumb = crate::platform::hittest::RectI::new(
                     x as i32,
                     thumb_y as i32,
@@ -301,13 +298,7 @@ impl GridPainter {
                 (rect.w as f32 - TILE_PADDING * 2.0).max(1.0),
                 LABEL_HEIGHT,
             );
-            text.draw(
-                ctx,
-                label,
-                Role::Tile,
-                label_rect,
-                scheme.text_primary,
-            )?;
+            text.draw(ctx, label, Role::Tile, label_rect, scheme.text_primary)?;
         }
 
         // 裁剪由 `_clip_guard` 的 Drop 负责出栈（含提前返回的路径），这里不再手写 Pop。

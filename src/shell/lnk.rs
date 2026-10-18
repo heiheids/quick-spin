@@ -15,7 +15,9 @@
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, IPersistFile, STGM_READ};
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, IPersistFile, STGM_READ,
+};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     IShellLinkW, SHGetNameFromIDList, SHParseDisplayName, SIGDN_DESKTOPABSOLUTEPARSING,
@@ -152,14 +154,8 @@ pub fn create_shell_shortcut(dest: &Path, parsing_name: &str, description: &str)
     // SAFETY: 调用方保证 COM 已初始化；`pidl` 由 CoTaskMemFree 释放。
     unsafe {
         let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
-        SHParseDisplayName(
-            PCWSTR(name_wide.as_ptr()),
-            None,
-            &mut pidl,
-            0,
-            None,
-        )
-        .ctx("SHParseDisplayName")?;
+        SHParseDisplayName(PCWSTR(name_wide.as_ptr()), None, &mut pidl, 0, None)
+            .ctx("SHParseDisplayName")?;
 
         if pidl.is_null() {
             return Err(AppError::Win32 {
@@ -270,10 +266,11 @@ impl Resolver {
                 Ok(()) => take_string(&path_buf),
                 Err(_) => {
                     path_buf.fill(0);
-                    match self
-                        .link
-                        .GetPath(&mut path_buf, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32)
-                    {
+                    match self.link.GetPath(
+                        &mut path_buf,
+                        std::ptr::null_mut(),
+                        SLGP_RAWPATH.0 as u32,
+                    ) {
                         Ok(()) => take_string(&path_buf),
                         Err(_) => String::new(),
                     }

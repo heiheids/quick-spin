@@ -31,10 +31,10 @@
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{
-    GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM, WIN32_ERROR,
+    GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, HBRUSH, InvalidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, HBRUSH, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, ScreenToClient, ValidateRect,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -74,7 +74,10 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 // `Clone` 仍在，绝大多数事件是小的值类型，克隆代价可忽略。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Resized { width: u32, height: u32 },
+    Resized {
+        width: u32,
+        height: u32,
+    },
     /// 窗口被移动了（`WM_MOVE`）。
     ///
     /// 与 `Resized` 分开是必须的：用户拖动标题栏时窗口**只移动、不改尺寸**，
@@ -89,19 +92,41 @@ pub enum Event {
     /// 我们自己的消息循环被卡在里面，但 `WM_MOVE` 仍会送到窗口过程。
     /// 同步分发让被吸附的弹窗在拖动**过程中**实时跟上，而不是等松手才跳一下。
     Moved,
-    DpiChanged { dpi: u32 },
+    DpiChanged {
+        dpi: u32,
+    },
     /// 开始 / 结束拖动窗口尺寸。
     /// 缩放期间上层应切到轻量绘制（架构设计铁律 6）。
-    SizeMove { entering: bool },
-    MouseDown { x: i32, y: i32 },
-    MouseUp { x: i32, y: i32, inside: bool },
+    SizeMove {
+        entering: bool,
+    },
+    MouseDown {
+        x: i32,
+        y: i32,
+    },
+    MouseUp {
+        x: i32,
+        y: i32,
+        inside: bool,
+    },
     /// 右键按下。单独一个事件而不是给 `MouseDown` 加 button 字段：
     /// 右键和左键的处理路径完全不同（右键弹菜单、不参与拖动与悬停状态机），
     /// 混在一个事件里会逼着每个左键分支都先判断一次按键。
-    RightMouseDown { x: i32, y: i32 },
-    MouseMove { x: i32, y: i32 },
+    RightMouseDown {
+        x: i32,
+        y: i32,
+    },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
     MouseLeave,
-    Wheel { x: i32, y: i32, delta: i32, ctrl: bool },
+    Wheel {
+        x: i32,
+        y: i32,
+        delta: i32,
+        ctrl: bool,
+    },
     /// 输入了一个字符。已经过 IME 组合，可直接插入。
     Char(char),
     /// 按下了非字符键。参数是虚拟键码（`VK_*`）。
@@ -110,7 +135,9 @@ pub enum Event {
     /// 也要收功能键（退格、方向键、回车、Esc），两者来源的消息不同。
     KeyDown(u32),
     /// 用户把文件拖进了窗口。路径已经是**普通文件系统路径**。
-    FilesDropped { paths: Vec<std::path::PathBuf> },
+    FilesDropped {
+        paths: Vec<std::path::PathBuf>,
+    },
     /// OLE 拖放完成（`platform::drop_target`）。
     ///
     /// 与 `FilesDropped` 分开是因为**落盘已经在那一边做完了**：
@@ -251,7 +278,8 @@ fn unregister_window(hwnd: HWND) {
 }
 
 /// 把所有变脏的窗口各画一帧。
-fn paint_dirty_windows() {    // 先取快照再逐个处理：绘制回调里可能创建或销毁窗口
+fn paint_dirty_windows() {
+    // 先取快照再逐个处理：绘制回调里可能创建或销毁窗口
     //（弹出窗口自己关闭就是），持着 `RefCell` 借用去跑回调会 panic。
     let snapshot: Vec<HWND> = LIVE_WINDOWS.with(|v| v.borrow().clone());
     for hwnd in snapshot {
@@ -1072,7 +1100,8 @@ unsafe extern "system" fn wnd_proc(
         // 落盘已经在 `drop_target` 里做完了，这里只负责通知上层"重新扫描"。
         // 拆成"那边落盘 + 这边收消息"是因为消息会回到正常的处理时机，
         // 不会在 OLE 的调用栈里重入界面逻辑。
-        crate::platform::drop_target::WM_DROP_COMPLETED => {            emit(hwnd, Event::ExternalDrop);
+        crate::platform::drop_target::WM_DROP_COMPLETED => {
+            emit(hwnd, Event::ExternalDrop);
             mark_dirty(hwnd);
             return LRESULT(0);
         }

@@ -14,9 +14,7 @@
 //! 渐变笔刷只在**配色或透明度变化**时重建；窗口尺寸变化只更新渐变端点
 //! （`SetStartPoint` / `SetEndPoint`，极便宜）。这样拖边框时不会反复创建资源。
 
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F,
-};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D1_GRADIENT_STOP};
 use windows::Win32::Graphics::Direct2D::*;
 use windows_numerics::Vector2;
 
@@ -108,8 +106,11 @@ impl PanelPainter {
 
         if self.key.as_ref() != Some(&key) {
             let panel = scheme.panel_with_opacity(opacity);
-            self.panel_brush =
-                Some(make_linear_brush(ctx, to_d2d(panel.from), to_d2d(panel.to))?);
+            self.panel_brush = Some(make_linear_brush(
+                ctx,
+                to_d2d(panel.from),
+                to_d2d(panel.to),
+            )?);
             self.edge_brush = Some(make_linear_brush(
                 ctx,
                 to_d2d(scheme.border.from),
@@ -178,8 +179,7 @@ impl PanelPainter {
                         let step = ring as f32 / GLOW_RINGS as f32;
                         let inflate = scheme.glow_radius * step;
                         // 平方衰减比线性更接近真实发光
-                        let alpha =
-                            scheme.glow_strength * (1.0 - step).powi(2) * GLOW_PEAK_ALPHA;
+                        let alpha = scheme.glow_strength * (1.0 - step).powi(2) * GLOW_PEAK_ALPHA;
                         if alpha <= 0.004 {
                             continue;
                         }
@@ -236,7 +236,10 @@ impl PanelPainter {
                     while x <= clip.right {
                         ctx.DrawLine(
                             Vector2 { X: x, Y: clip.top },
-                            Vector2 { X: x, Y: clip.bottom },
+                            Vector2 {
+                                X: x,
+                                Y: clip.bottom,
+                            },
                             brush,
                             TEXTURE_WIDTH,
                             no_style,
@@ -247,7 +250,10 @@ impl PanelPainter {
                     while y <= clip.bottom {
                         ctx.DrawLine(
                             Vector2 { X: clip.left, Y: y },
-                            Vector2 { X: clip.right, Y: y },
+                            Vector2 {
+                                X: clip.right,
+                                Y: y,
+                            },
                             brush,
                             TEXTURE_WIDTH,
                             no_style,
