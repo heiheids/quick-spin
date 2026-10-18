@@ -577,6 +577,103 @@ fn selftest() -> ExitCode {
         app.selftest_live_window_count()
     );
 
+    // 弹出子窗口的布局几何。纯算术，能离线把"越界/重叠"这类问题测死。
+    {
+        use popout::layout::{BUTTON_GAP, PopoutLayout, TITLE_BAR, TitleButton};
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // 最小尺寸、典型尺寸、大尺寸都试：布局在不同宽高下的退化行为不同。
+        for (w, h) in [(200, 160), (320, 420), (900, 1400), (420, 300)] {
+            let l = PopoutLayout::compute(w, h, 48);
+            let tag = format!("{w}×{h}");
+
+            // 面板必须覆盖整个客户区（画背景与描边靠它）
+            if l.width != w || l.height != h || l.panel.w != w || l.panel.h != h {
+                failures.push(format!("{tag} 面板未覆盖客户区"));
+            }
+
+            // 四个按钮都要落在窗口内
+            for (i, b) in l.buttons.iter().enumerate() {
+                if b.x < 0 || b.y < 0 || b.x + b.w > w || b.y + b.h > h {
+                    failures.push(format!("{tag} 第 {i} 个按钮越界"));
+                }
+            }
+            // 按钮两两不重叠
+            for i in 0..4 {
+                for j in (i + 1)..4 {
+                    if l.buttons[i].intersects(&l.buttons[j]) {
+                        failures.push(format!("{tag} 按钮 {i}/{j} 重叠"));
+                    }
+                }
+            }
+            // 关闭按钮必须在最右（它点得最多、最不能点错）
+            if l.buttons[3].x <= l.buttons[2].x || l.buttons[3].x <= l.buttons[0].x {
+                failures.push(format!("{tag} 关闭不在最右"));
+            }
+            // 标题文字不能压到按钮组上
+            if l.title_text.x + l.title_text.w > l.buttons[0].x {
+                failures.push(format!("{tag} 标题压到按钮"));
+            }
+            // 内容区要在窗口内且非负
+            if l.content.w < 0 || l.content.h < 0 {
+                failures.push(format!("{tag} 内容区为负"));
+            }
+            if l.content.y + l.content.h > h {
+                failures.push(format!("{tag} 内容区越界"));
+            }
+            // 网格至少一列，方格边长不小于下限
+            if l.columns < 1 || l.tile < 16 {
+                failures.push(format!("{tag} 网格参数非法"));
+            }
+            // 命中测试：每个按钮的中心都要命中它自己
+            for (i, b) in l.buttons.iter().enumerate() {
+                let hit = l.button_at(b.x + b.w / 2, b.y + b.h / 2);
+                let want = popout::layout::TITLE_BUTTONS[i];
+                if hit != Some(want) {
+                    failures.push(format!("{tag} 第 {i} 个按钮中心命中错误"));
+                }
+            }
+            // 内容区（避开方格）不应命中任何标题栏按钮
+            if l.button_at(l.content.x + 4, l.content.y + 4).is_some() {
+                failures.push(format!("{tag} 内容区误命中标题栏按钮"));
+            }
+            // 按钮间距必须真的是 BUTTON_GAP（相邻按钮左边缘之差）
+            let pitch = l.buttons[1].x - l.buttons[0].x;
+            if pitch != l.buttons[0].w + BUTTON_GAP {
+                failures.push(format!("{tag} 按钮间距不对"));
+            }
+            // 标题栏高度不超过窗口高度
+            if TITLE_BAR > h && l.title_bar.h != h {
+                failures.push(format!("{tag} 标题栏超高"));
+            }
+            let _ = TitleButton::Color; // 枚举被引用过，避免"未使用"噪声
+        }
+
+        // 方格排布：第 0 个在网格原点，第 columns 个换行
+        let l = PopoutLayout::compute(320, 420, 48);
+        let rh = l.row_height();
+        if l.tile_at(0, rh) != l.grid_origin {
+            failures.push("首格不在网格原点".to_string());
+        }
+        let (x1, y1) = l.tile_at(l.columns, rh);
+        if x1 != l.grid_origin.0 || y1 <= l.grid_origin.1 {
+            failures.push("换行位置不对".to_string());
+        }
+
+        println!(
+            "弹出窗布局 : {}",
+            if failures.is_empty() {
+                format!(
+                    "4 种尺寸下 按钮不越界/不重叠/关闭最右/标题不压按钮/内容区合法/命中正确/间距正确 —— 全部通过（典型 320×420：{} 列，方格 {}）",
+                    l.columns, l.tile
+                )
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
     println!(
         "后台扫描   : 已就绪，共 {} 条；选项卡「{}」显示 {} 条",
         app.scanned_total(),

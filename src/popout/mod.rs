@@ -31,6 +31,7 @@
 //! **映射**而不是单个字段。键用选项卡的 `key`（配置里的稳定标识），
 //! 不用下标 —— 下标在增删选项卡后会漂移。
 
+pub mod layout;
 pub mod state;
 
 pub use state::PopoutState;
