@@ -434,6 +434,28 @@ fn selftest() -> ExitCode {
         }
     }
 
+    // 帧耗时：直接量"连续重绘能不能跟得上鼠标"。
+    //
+    // 拖动（框选、拖窗口尺寸）期间是**每一帧都在重绘**的，所以帧耗时
+    // 就是手感的上限：超过一个刷新周期（60Hz ≈ 16.7ms）就会开始积压，
+    // 表现为选框滞后于光标。
+    {
+        let (avg_raw, worst_raw) = app.selftest_frame_bench(40, true);
+        let (avg_vs, worst_vs) = app.selftest_frame_bench(40, false);
+        println!(
+            "帧耗时     : 不等同步 平均 {:>5.1}ms / 最慢 {:>5.1}ms  → 上限 {:>3.0} fps",
+            avg_raw,
+            worst_raw,
+            1000.0 / avg_raw.max(0.01)
+        );
+        println!(
+            "             等同步   平均 {:>5.1}ms / 最慢 {:>5.1}ms  → 上限 {:>3.0} fps",
+            avg_vs,
+            worst_vs,
+            1000.0 / avg_vs.max(0.01)
+        );
+    }
+
     println!(
         "后台扫描   : 已就绪，共 {} 条；选项卡「{}」显示 {} 条",
         app.scanned_total(),

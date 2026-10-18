@@ -198,8 +198,68 @@ impl Marquee {
     }
 }
 
-/// 承认"这是一次框选"所需的最小拖动距离（逻辑像素）。与方格拖拽同一量级。
+/// 判定"这是一次框选"所需的最小拖动距离（逻辑像素）。与方格拖拽同一量级。
 const MARQUEE_MIN: i32 = 3;
+
+/// 帧耗时统计。
+///
+/// **只在持续重绘时写日志**（每秒最多一行，且那一秒内至少画了 20 帧）。
+/// 偶发重绘（悬停换格、图标就绪）不写：写日志本身比画一帧还贵，
+/// 平时开着它反而会制造卡顿。而"连续绘帧"基本只有一种成因 ——
+/// 用户正在拖动，那正是需要知道"每秒实际能画几帧"的时刻。
+///
+/// 存在的理由：`--selftest` 里的帧计时测的是**没有合成**的窗口
+///（自检不显示窗口，DWM 不参与），所以它只能证明"我们的绘制很便宜"，
+/// 证明不了"真实窗口里一帧多少钱"。要定位拖动卡顿，必须在真实条件下量。
+struct FrameStat {
+    since: std::time::Instant,
+    frames: u32,
+    total_ms: f32,
+    worst_ms: f32,
+    moves: u32,
+}
+
+impl FrameStat {
+    fn new() -> Self {
+        Self {
+            since: std::time::Instant::now(),
+            frames: 0,
+            total_ms: 0.0,
+            worst_ms: 0.0,
+            moves: 0,
+        }
+    }
+
+    /// 记一次鼠标移动。用来和帧数对照：两者差距大说明重绘被合并了（好事）。
+    fn note_move(&mut self) {
+        self.moves += 1;
+    }
+
+    fn sample(&mut self, ms: f32) {
+        self.frames += 1;
+        self.total_ms += ms;
+        if ms > self.worst_ms {
+            self.worst_ms = ms;
+        }
+        if self.since.elapsed().as_secs_f32() < 1.0 {
+            return;
+        }
+        if self.frames >= 20 {
+            diag(&format!(
+                "帧统计: {} 帧/秒  绘制 平均 {:.1}ms / 最慢 {:.1}ms  同秒鼠标移动 {} 次",
+                self.frames,
+                self.total_ms / self.frames as f32,
+                self.worst_ms,
+                self.moves
+            ));
+        }
+        self.since = std::time::Instant::now();
+        self.frames = 0;
+        self.total_ms = 0.0;
+        self.worst_ms = 0.0;
+        self.moves = 0;
+    }
+}
 
 /// 方格拖拽的启动阈值（逻辑像素）。与侧栏选项卡排序用的是同一个量级。
 ///
@@ -407,6 +467,9 @@ pub struct App {
     /// 与 `tile_drag` **互斥**：一个从方格上起手、一个从空白处起手，
     /// 不可能同时存在。两者的落点处理也因此互不干扰。
     marquee: Option<Marquee>,
+
+    /// 帧耗时统计（只在持续重绘时写 `诊断.log`，见 [`FrameStat`]）。
+    frame_stat: FrameStat,
 
     /// 正在录制全局热键。
     ///
@@ -666,6 +729,7 @@ impl App {
             tile_drag: None,
             tile_drop: None,
             marquee: None,
+            frame_stat: FrameStat::new(),
             menu_anchor: (0, 0),
             resizing: false,
         })
@@ -839,6 +903,37 @@ impl App {
             }
         }
         self.draw()
+    }
+
+    /// 自检用：连画若干帧并计时，返回 `(平均毫秒, 最慢毫秒)`。
+    ///
+    /// `no_vsync` 为真时走"正在拖动"的 Present 策略（不等垂直同步），
+    /// 量到的是**这一帧真正要花的时间**；为假时量到的是"加上等垂直同步"
+    /// 的墙上时间。两者一减就是同步等待的代价。
+    ///
+    /// 加这个是为了回答"拖动为什么卡"这类问题：凭感觉猜是错误的来源，
+    /// 而"每秒能画几帧"必须测量 —— 帧耗时超过一个刷新周期时，
+    /// 鼠标移动就会被积压，手感就是"发涩"。
+    pub fn selftest_frame_bench(&mut self, frames: usize, no_vsync: bool) -> (f32, f32) {
+        let saved = self.resizing;
+        self.resizing = no_vsync;
+        let mut total = 0.0f32;
+        let mut worst = 0.0f32;
+        let frames = frames.max(2);
+        for i in 0..frames {
+            let t = std::time::Instant::now();
+            if self.draw().is_err() {
+                break;
+            }
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+            // 第 0 帧会带上延迟初始化（DXGI 首帧、字形缓存等），不计入平均。
+            if i > 0 {
+                total += ms;
+                worst = worst.max(ms);
+            }
+        }
+        self.resizing = saved;
+        (total / (frames - 1) as f32, worst)
     }
 
     /// 采纳扫描结果。
@@ -3544,6 +3639,7 @@ impl App {
     }
 
     fn on_mouse_move(&mut self, x: i32, y: i32) -> bool {
+        self.frame_stat.note_move();
         let (lx, ly) = self.to_logical(x, y);
 
         // ---- 方格拖拽中 ----
@@ -3801,7 +3897,10 @@ impl Handler for App {
     }
 
     fn paint(&mut self) {
-        if let Err(e) = self.draw() {
+        let t = std::time::Instant::now();
+        let result = self.draw();
+        self.frame_stat.sample(t.elapsed().as_secs_f32() * 1000.0);
+        if let Err(e) = result {
             eprintln!("绘制失败: {e}");
         }
     }
