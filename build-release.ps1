@@ -21,8 +21,16 @@ Set-Location $root
 $env:RUSTFLAGS = "--remap-path-prefix=$env:USERPROFILE\.cargo=.cargo"
 Write-Host "RUSTFLAGS = $env:RUSTFLAGS"
 
+# cargo 会把 "Compiling ..." 写到 **stderr**。PS 5.1 在 `$ErrorActionPreference='Stop'`
+# 下会把原生命令的 stderr 当成**终止性错误** —— 脚本于是在编译刚起步时直接中断，
+# 报出来的东西还长得像 "cargo 失败"，实际上一行都没编完
+#（实测：脚本退出码 1，而 exe 的时间戳纹丝不动）。
+# 所以这一段单独放宽策略，成败只认 `$LASTEXITCODE`。
+$ErrorActionPreference = 'Continue'
 cargo build --release
-if ($LASTEXITCODE -ne 0) { throw "cargo build 失败（退出码 $LASTEXITCODE）" }
+$code = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($code -ne 0) { throw "cargo build 失败（退出码 $code）" }
 
 # ---- 2. 校验产物 ----
 $exe = Join-Path $root 'target\release\quick-spin.exe'
