@@ -160,6 +160,23 @@ impl PopoutLayout {
         )
     }
 
+    /// 命中哪个方格，返回**可见序号**（与 [`PopoutLayout::tile_at`] 同口径）。
+    ///
+    /// 命中范围是**整行**（方格 + 它下面的名称），不是只有那个正方形。
+    /// 主窗口的方格矩形同样是"图标 + 名称"一整块（`ui::layout` 里 `tile_h`
+    /// 含 `LABEL_HEIGHT`），所以两边的点击手感一致 —— 点名字也算点那一格。
+    ///
+    /// 边界都按 `visible_tiles` 算：格间空隙、行尾空白、标题栏、四个按钮
+    /// 都返回 `None`。**不要**在这里另写一份行高/列数判断，
+    /// 否则"画出来的、取图标的、点得到的"会变成三个范围。
+    pub fn tile_index_at(&self, lx: i32, ly: i32, total: usize) -> Option<usize> {
+        let row_h = self.row_height();
+        (0..self.visible_tiles(total)).find(|&i| {
+            let (tx, ty) = self.tile_at(i, row_h);
+            RectI::new(tx, ty, self.tile, row_h).contains(lx, ly)
+        })
+    }
+
     /// 命中哪个标题栏按钮。
     pub fn button_at(&self, lx: i32, ly: i32) -> Option<TitleButton> {
         // 按 `TITLE_BUTTONS` 的顺序找，所以下标与枚举一一对应。

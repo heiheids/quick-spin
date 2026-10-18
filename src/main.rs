@@ -675,6 +675,99 @@ fn selftest() -> ExitCode {
         );
     }
 
+    // 弹出子窗口的**点击命中**：点哪一格才算点到了它。
+    //
+    // 纯几何，所以无头自检能钉住 —— 而"点上去真的启动了程序"不行（要真窗口），
+    // 那一半只能靠真实界面确认。这里钉的是边界：格内、名称行、格间空隙、
+    // 标题栏、四个按钮、行尾空白、被裁掉的那半行。
+    {
+        use popout::layout::{PopoutLayout, TITLE_BUTTONS};
+
+        let mut failures: Vec<String> = Vec::new();
+        let l = PopoutLayout::compute(320, 420, 48);
+        let rh = l.row_height();
+        let total = 40usize; // 多于放得下的格数，用来检查"被裁掉的不该命中"
+        let visible = l.visible_tiles(total);
+        if visible == 0 {
+            failures.push("320×420 下一个方格都放不下".to_string());
+        }
+        let mid = |r: (i32, i32)| (r.0 + l.tile / 2, r.1 + rh / 2);
+
+        // 1. 每一格的中心都要命中它自己（方格正中）
+        for i in 0..visible {
+            let r = l.tile_at(i, rh);
+            if l.tile_index_at(r.0 + l.tile / 2, r.1 + l.tile / 2, total) != Some(i) {
+                failures.push(format!("第 {i} 格中心没有命中它自己"));
+            }
+        }
+
+        // 2. 名称行也算命中那一格（与主窗口一致：方格矩形含名称）
+        let (x0, y0) = l.tile_at(0, rh);
+        if l.tile_index_at(x0 + 2, y0 + l.tile + 4, total) != Some(0) {
+            failures.push("名称行没有命中格子".to_string());
+        }
+
+        // 3. 格间空隙不该命中任何一格
+        //    取第 0 格的右边缘再往右 1px（仍在 TILE_GAP 里）
+        if l.tile_index_at(x0 + l.tile + 1, y0 + l.tile / 2, total).is_some() {
+            failures.push("格间空隙误命中".to_string());
+        }
+        //    行下沿再往下 1px（仍在行距里）
+        if l.tile_index_at(x0 + l.tile / 2, y0 + rh + 1, total).is_some() {
+            failures.push("行间空隙误命中".to_string());
+        }
+
+        // 4. 标题栏与四个按钮都不该命中方格
+        //    （标题栏在内容区之上，按钮也在标题栏里）
+        for (i, b) in l.buttons.iter().enumerate() {
+            let hit = l.tile_index_at(b.x + b.w / 2, b.y + b.h / 2, total);
+            if hit.is_some() {
+                failures.push(format!("第 {i} 个标题栏按钮误命中方格"));
+            }
+            let _ = TITLE_BUTTONS[i];
+        }
+        if l.tile_index_at(l.title_text.x + 2, l.title_text.y + 2, total).is_some() {
+            failures.push("标题栏误命中方格".to_string());
+        }
+
+        // 5. 被裁掉的那半行**不该**命中：放不下的格子既没画、也取不到图标，
+        //    它若还能被点到，用户会点到一个看不见的东西并启动程序。
+        if visible < total {
+            let r = l.tile_at(visible, rh);
+            if l.tile_index_at(r.0 + l.tile / 2, r.1 + l.tile / 2, total).is_some() {
+                failures.push("放不下的格子仍然能命中".to_string());
+            }
+        }
+
+        // 6. 条目数少于可见格数时，多出来的格子不该命中
+        //    （`visible_tiles(total)` 用的是**条目数**，这里用小 total 验证）
+        let small = 1usize;
+        if l.tile_index_at(x0 + l.tile / 2, y0 + l.tile / 2, small) != Some(0) {
+            failures.push("只有一条时第 0 格命不中".to_string());
+        }
+        let r1 = l.tile_at(1, rh);
+        if l.tile_index_at(r1.0 + l.tile / 2, r1.1 + l.tile / 2, small).is_some() {
+            failures.push("只有一条时第 1 格仍然能命中".to_string());
+        }
+
+        // 7. 窗口小到只剩标题栏时，命中必须是 None 而不是 panic
+        let tiny = PopoutLayout::compute(200, 40, 48);
+        if tiny.tile_index_at(mid((0, 0)).0, mid((0, 0)).1, total).is_some() {
+            failures.push("极窄窗口仍然命中了方格".to_string());
+        }
+
+        println!(
+            "弹窗点击命中: {}",
+            if failures.is_empty() {
+                format!(
+                    "格内 / 名称行 / 格间空隙 / 标题栏 / 四个按钮 / 放不下的半行 / 条目数不足 / 极窄窗口 —— 全部通过（320×420 可见 {visible} 格）"
+                )
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
     // 弹出子窗口标题栏四个图标的外形。纯几何，验证"画的和点的在同一块地方"。
     {
         use popout::layout::{PopoutLayout, TITLE_BUTTONS};
@@ -811,10 +904,14 @@ fn selftest() -> ExitCode {
             Item {
                 name: "记事本".to_string(),
                 source: icon.clone(),
+                lnk: std::path::PathBuf::from(r"C:\数据\shortcuts\记事本.lnk"),
+                target: std::path::PathBuf::from(r"C:\Windows\System32\notepad.exe"),
             },
             Item {
                 name: "画图".to_string(),
                 source: image.clone(),
+                lnk: std::path::PathBuf::from(r"C:\数据\shortcuts\画图.lnk"),
+                target: std::path::PathBuf::from(r"C:\Windows\System32\mspaint.exe"),
             },
         ];
         let base = Content {
@@ -843,11 +940,19 @@ fn selftest() -> ExitCode {
         if reordered == base {
             failures.push("顺序变化没被察觉".to_string());
         }
+        // 启动目标变了也要被察觉：`.lnk` 还在、名字也没改，但用户重新指向了
+        // 别的程序（或换个图标后我们记的目标路径变了）。`Item` 里那两个字段
+        // 必须参与相等比较，否则弹窗会拿着旧目标启动。
+        let mut retargeted = base.clone();
+        retargeted.items[0].target = std::path::PathBuf::from(r"D:\别的\程序.exe");
+        if retargeted == base {
+            failures.push("启动目标变化没被察觉".to_string());
+        }
 
         println!(
             "弹出窗图标管线: {}",
             if failures.is_empty() {
-                "像素换算 6 档 / 键同源相等、随尺寸变化、按图与按图标分开 / 内容比较（改名·重排·改尺寸）—— 全部通过".to_string()
+                "像素换算 6 档 / 键同源相等、随尺寸变化、按图与按图标分开 / 内容比较（改名·重排·改尺寸·换启动目标）—— 全部通过".to_string()
             } else {
                 format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
             }

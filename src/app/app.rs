@@ -1603,6 +1603,11 @@ impl App {
                                 // 图标来源与主窗口绘制用的是同一个函数，
                                 // 所以两个窗口的图标必然一致。
                                 source: self.icon_source(i)?,
+                                // 启动要用的是 `.lnk` 本身与它解析出来的目标，
+                                // **不是 `source.path`** —— 用户"更换图标"之后
+                                // 那个路径指向的是图片，拿它启动会去打开图片。
+                                lnk: shortcut.lnk_path.clone(),
+                                target: shortcut.target.clone(),
                             })
                         })
                         .collect();

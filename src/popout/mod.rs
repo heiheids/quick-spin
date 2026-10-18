@@ -13,6 +13,7 @@
 //! | `layout.rs` | 这个窗口自己的布局（**不复用**主窗口的 `ui::layout`） |
 //! | `painter.rs` | 绘制：标题栏（4 个按钮）+ 图标网格 |
 //! | `icons.rs` | 内容快照 + 这个窗口自己的图标管线（加载线程与位图缓存） |
+//! | `launch.rs` | 点一格 = 启动它（复用 `shell::launch`，不另写启动路径） |
 //! | `window.rs` | 窗口行为：吸附跟随 / 脱离拖动 / 钉桌面 / 就地改名 |
 //! | `report.rs` | 回报通道：弹窗自己关了时要让装配层知道（否则菜单文案是错的） |
 //!
@@ -34,6 +35,7 @@
 //! 不用下标 —— 下标在增删选项卡后会漂移。
 
 pub mod icons;
+pub mod launch;
 pub mod layout;
 pub mod painter;
 pub mod report;

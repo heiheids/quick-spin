@@ -17,6 +17,26 @@ use crate::render::composer::Composer;
 use crate::render::device::Renderer;
 use crate::render::TextEngine;
 
+/// "一次单击"允许的最大移动量（逻辑像素）。
+///
+/// 与主窗口 `TILE_DRAG_THRESHOLD` 取同一个数（4），手感才一致。
+/// 这里**不能**直接引用那个常量：它在 `app` 里，而弹出窗口是下层，
+/// 让下层依赖装配层会把依赖方向弄反（同 `launch.rs` 里那条理由）。
+/// 数值本身是小的，两处各写一份的风险可接受；要改就一起改。
+const CLICK_TOLERANCE: i32 = 4;
+
+/// 按下的方格，等松手时决定要不要启动。
+///
+/// `Copy`：两个字段都是标量，在 `MouseMove` 里每帧读一次时不必借用 `self.press`
+///（借了就没法在同一个分支里写它）。
+#[derive(Clone, Copy)]
+struct TilePress {
+    /// 可见序号（`content.items` 的下标）。
+    index: usize,
+    /// 按下的起点（逻辑坐标），用来判断"是不是只是抖了一下"。
+    start: (i32, i32),
+}
+
 /// 一个活着的弹出子窗口。
 pub struct Popout {
     window: Window,
@@ -36,6 +56,11 @@ pub struct Popout {
     tab_key: String,
     /// 当前悬停的标题栏按钮
     hover: Option<TitleButton>,
+    /// 按下但还没松手的方格（见 [`TilePress`]）。
+    ///
+    /// 与主窗口同一个判据：**按下时不启动**，要等松手时确认"没怎么移动过"
+    /// 才算一次单击。按下就启动的话，拖动窗口前的那一下按下就会顺手启动一个程序。
+    press: Option<TilePress>,
     /// 是否正在拖动窗口尺寸
     resizing: bool,
     /// 要显示的条目，与主窗口该选项卡的**可见条目**保持同步。
@@ -90,6 +115,7 @@ impl Popout {
             title: title.to_string(),
             tab_key: tab_key.to_string(),
             hover: None,
+            press: None,
             resizing: false,
             content: Content {
                 icon_size,
@@ -259,14 +285,32 @@ impl Handler for Popout {
             }
             Event::MouseMove { x, y } => {
                 let (lx, ly) = self.to_logical(x, y);
+                let mut redraw = false;
                 let h = self.layout.button_at(lx, ly);
                 if h != self.hover {
                     self.hover = h;
-                    return true;
+                    redraw = true;
                 }
-                false
+                // 按下之后移动超过容差 = 这不是一次单击（用户可能在拖窗口，
+                // 或者只是手抖）→ 取消这次启动候选。
+                //
+                // 不做这一步的症状：想微调窗口位置，手一抖就启动了一个程序。
+                if let Some(p) = self.press {
+                    let (dx, dy) = (lx - p.start.0, ly - p.start.1);
+                    if dx.abs() > CLICK_TOLERANCE || dy.abs() > CLICK_TOLERANCE {
+                        self.press = None;
+                    }
+                }
+                redraw
             }
             Event::MouseLeave => {
+                // 鼠标离开窗口：按下的候选必须作废。
+                //
+                // 弹窗没有 `SetCapture`，在窗口外松手时收不到 `MouseUp`，
+                // 状态会一直挂着 —— 那样下一次松手（哪怕点的是别的东西）
+                // 会莫名启动一个程序。这是主窗口"拖拽生命周期绝不跨过两次按下"
+                // 的同一条保险，这里更简单：离开即作废。
+                self.press = None;
                 if self.hover.is_some() {
                     self.hover = None;
                     return true;
@@ -280,14 +324,60 @@ impl Handler for Popout {
                     // 本窗口不是主窗口，所以销毁它**不会**结束消息循环
                     //（见 `window.rs` 的 WM_DESTROY）。
                     Some(TitleButton::Close) => {
+                        self.press = None;
                         self.window.close();
                         false
                     }
                     // 其余三个按钮（改色 / 吸附 / 钉桌面）是下一步。
                     // 现在点它们只是不响应 —— 不做假的视觉反馈。
-                    Some(_) => false,
-                    None => false,
+                    Some(_) => {
+                        self.press = None;
+                        false
+                    }
+                    // 点在方格（或它下面的名称）上：**先不启动**，
+                    // 记下来等松手时再判断（判据见 `press` 与 `CLICK_TOLERANCE`）。
+                    None => {
+                        self.press =
+                            self.layout
+                                .tile_index_at(lx, ly, self.content.items.len())
+                                .map(|index| TilePress {
+                                    index,
+                                    start: (lx, ly),
+                                });
+                        // 弹窗这边按下不改任何视觉状态（没有选中集、也没有按下态），
+                        // 所以不必请求重绘。
+                        false
+                    }
                 }
+            }
+            Event::MouseUp { x, y, inside } => {
+                // 一次单击 = 按下与松手之间没怎么移动过、松手时还在窗口里、
+                // 而且**落在同一格**上。任何一条不满足都不启动 ——
+                // 拖窗口前后那两下按下不该顺手启动一个程序。
+                //
+                // `inside` 目前**恒为真**：窗口没有 `SetCapture`，鼠标在窗口外
+                // 松手时我们根本收不到 `MouseUp`（那种情况由 `MouseLeave` 作废）。
+                // 这里仍然判一次，是为了让判据本身完整、不依赖平台层当前的实现 ——
+                // 哪天给弹窗加上捕获，这条就不会突然失效。
+                let Some(p) = self.press.take() else {
+                    return false;
+                };
+                if !inside {
+                    return false;
+                }
+                let (lx, ly) = self.to_logical(x, y);
+                if self
+                    .layout
+                    .tile_index_at(lx, ly, self.content.items.len())
+                    != Some(p.index)
+                {
+                    return false;
+                }
+                if let Some(item) = self.content.items.get(p.index) {
+                    super::launch::launch(item);
+                }
+                // 启动不改变本窗口的任何像素，所以不请求重绘。
+                false
             }
             _ => false,
         }

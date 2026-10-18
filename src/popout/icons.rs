@@ -92,11 +92,23 @@ impl IconSource {
     }
 }
 
-/// 要画的一条：名称 + 图标来源。
+/// 要画的一条：名称 + 图标来源 + **启动需要的东西**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub name: String,
     pub source: IconSource,
+    /// 条目的 `.lnk` 本身。
+    ///
+    /// **启动必须用它，不能用 `source.path`。** 用户"更换图标"之后
+    /// `source.path` 指向的是**那张图片**，拿它去启动会打开一张图片，
+    /// 而不是启动程序 —— 而且不报错，只是行为莫名其妙。
+    pub lnk: PathBuf,
+    /// 已解析好的目标（`.lnk` 指向的 exe / 文件夹 / shell 项）。
+    ///
+    /// 文件夹要据此绕开 shell 的 DDE（见 `shell::launch::open_shortcut`），
+    /// 所以它必须与 `lnk` 一起推过来，不能在弹窗这边重新解析一次 ——
+    /// 重新解析要多一次 COM 调用，而且会与主窗口的结果不一致。
+    pub target: PathBuf,
 }
 
 /// 主窗口推来的一份内容快照。
