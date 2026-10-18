@@ -488,6 +488,14 @@ pub struct App {
     /// 不区分就是先前那个 bug：托盘菜单点「退出」只是把窗口藏了起来。
     exit_requested: bool,
 
+    /// 活着的弹出子窗口：键是选项卡 key。
+    ///
+    /// **装 `Box` 而不是直接装 `Popout`**：窗口层把处理器存成裸指针
+    ///（`Window::attach_ptr`），`Box` 的堆地址不随容器扩容而变；
+    /// 直接放 `Vec`/`BTreeMap` 的值里，一插入别的键就可能整体搬动，
+    /// 指针立刻失效 —— 那是未定义行为，而且不一定当场崩。
+    popouts: std::collections::BTreeMap<String, Box<crate::popout::window::Popout>>,
+
     /// 右键菜单。`Some` 表示菜单正展开。
     ///
     /// 它是**最上层**浮层：绘制最后画，点击最先处理。
@@ -787,6 +795,7 @@ impl App {
             hover_settings_close: false,
             hover_settings_button: None,
             exit_requested: false,
+            popouts: std::collections::BTreeMap::new(),
             menu: None,
             menu_hover: None,
             editing: None,
@@ -1453,6 +1462,75 @@ impl App {
     fn request_exit(&mut self) {
         self.exit_requested = true;
         self.window.close();
+    }
+
+    /// 打开 / 关闭某选项卡的弹出子窗口（侧栏右键菜单的入口）。
+    ///
+    /// 返回"是否需要重绘"（菜单项文案会变，所以基本总是要重绘）。
+    fn toggle_popout(&mut self, tab_key: &str) -> bool {
+        // 已经开着 → 关掉
+        if let Some(p) = self.popouts.remove(tab_key) {
+            p.close();
+            self.state.get_mut().popout.windows.remove(tab_key);
+            diag(&format!("弹出子窗口已关闭: {tab_key}"));
+            return true;
+        }
+
+        // 没开 → 按记录的状态开一个
+        let saved = self.state.get().popout.get(tab_key);
+        let tab_label = self
+            .tabs
+            .iter()
+            .find(|t| t.key == tab_key)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| tab_key.to_string());
+        let title = saved.title(&tab_label).to_string();
+
+        // 位置：优先用记下来的自由位置；否则吸附在主窗口右侧。
+        // `geometry()` 给的是屏幕物理像素，和 `Geometry` 要求的单位一致。
+        let main = self.window.geometry();
+        let scale = self.window.scale().max(1.0);
+        let (dw, dh) = (
+            (saved.width as f32 * scale) as i32,
+            (saved.height as f32 * scale) as i32,
+        );
+        let (mx, my) = (main.x.unwrap_or(0), main.y.unwrap_or(0));
+        let (x, y) = match (saved.x, saved.y) {
+            (Some(x), Some(y)) => (x, y),
+            // 吸附：贴主窗口右边缘，顶部对齐
+            _ => (mx + main.width, my),
+        };
+
+        let geometry = crate::platform::window::Geometry {
+            width: dw,
+            height: dh,
+            x: Some(x),
+            y: Some(y),
+        };
+
+        match crate::popout::window::Popout::create(
+            &title,
+            geometry,
+            self.scheme.clone(),
+            self.layout.icon_size as i32,
+        ) {
+            Ok(mut p) => {
+                p.attach();
+                self.popouts.insert(tab_key.to_string(), Box::new(p));
+                // 记下"开着"，下次启动自动恢复
+                let mut w = saved;
+                w.open = true;
+                self.state.get_mut().popout.set(tab_key, w);
+                diag(&format!("弹出子窗口已打开: {tab_key} @ {x},{y} {dw}×{dh}"));
+                true
+            }
+            Err(e) => {
+                // 建不出来必须让用户知道，否则表现为"点了没反应"。
+                // 这条路径没有可视化提示，所以至少留下日志。
+                diag(&format!("弹出子窗口创建失败: {tab_key} — {e}"));
+                true
+            }
+        }
     }
 
     /// 「关于更新」：用默认浏览器打开项目的发布页。
@@ -2893,6 +2971,20 @@ impl App {
             })
             .collect();
 
+        // ---- 弹出子窗口（开 / 关）----
+        //
+        // 文案按该选项卡当前有没有弹出窗口来定，而不是永远写"弹出子窗口"：
+        // 已经弹出来了还显示"弹出"，用户会以为点了会再弹一个。
+        if let Some(tab) = self.tabs.get(tab_index) {
+            let key = tab.key.clone();
+            let text = if self.popouts.contains_key(&key) {
+                "关闭子窗口".to_string()
+            } else {
+                "弹出子窗口".to_string()
+            };
+            items.push(MenuItem::new(TogglePopout(key), text));
+        }
+
         let delete_text = "删除".to_string();
         items.push(match deletable {
             None => MenuItem::new(Delete, delete_text),
@@ -3037,6 +3129,9 @@ impl App {
         match command {
             MenuCommand::Delete => ov.hidden = true,
             MenuCommand::AssignGroup(group) => ov.group = group,
+            // 选项卡级命令，已经在 `apply_tab_command` 里处理掉了；
+            // 走到这里说明是方格/侧栏空白处的菜单，不适用。
+            MenuCommand::TogglePopout(_) => {}
             MenuCommand::OpenLocation => {
                 // 只读操作，不写覆盖表
                 diag(&format!("OpenLocation 开始: {key}"));
@@ -3330,6 +3425,12 @@ impl App {
 
     /// 选项卡级命令：改配置里的选项卡定义。
     fn apply_tab_command(&mut self, target: MenuTarget, command: MenuCommand) -> bool {
+        // 弹出子窗口的开关：与侧栏空白处无关，先处理掉。
+        if let MenuCommand::TogglePopout(key) = &command {
+            let key = key.clone();
+            return self.toggle_popout(&key);
+        }
+
         // 侧栏空白处的"新建按钮"没有具体按钮作目标，单独处理
         if matches!(target, MenuTarget::Sidebar) {
             return match command {

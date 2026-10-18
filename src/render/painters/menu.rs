@@ -58,6 +58,13 @@ pub enum MenuCommand {
     AddApp(usize),
     /// 添加一个自定义网址（需要用户输入，见 `App` 里的处理）。
     AddUrl,
+    /// 侧栏按钮专属：把该选项卡弹成独立窗口 / 关掉它的独立窗口。
+    ///
+    /// **一个命令而不是两个**（打开 / 关闭）：菜单里到底显示哪一个，
+    /// 取决于该选项卡当前有没有弹出窗口，而那要读运行时状态；
+    /// 命令本身只表达"切换"，把判断留在 `App` 里。
+    /// 参数是选项卡 key。
+    TogglePopout(String),
 }
 
 /// 可添加的系统自带程序：`(菜单文字, System32 下的可执行文件名, Store 应用 AUMID)`。
@@ -117,6 +124,9 @@ impl MenuCommand {
                 .map(|(name, _, _)| (*name).to_string())
                 .unwrap_or_else(|| "（未知程序）".into()),
             Self::AddUrl => "网址".into(),
+            // 文案由 `App` 按"该选项卡当前有没有弹出窗口"填进 `MenuItem::text`，
+            // 所以这里的兜底值基本用不到；留着是为了 `label()` 的穷尽匹配。
+            Self::TogglePopout(_) => "弹出子窗口".into(),
             Self::AddShellLocation(i) => SHELL_LOCATIONS
                 .get(*i)
                 .map(|(name, _)| (*name).to_string())

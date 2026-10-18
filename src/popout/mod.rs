@@ -34,5 +34,6 @@
 pub mod layout;
 pub mod painter;
 pub mod state;
+pub mod window;
 
 pub use state::PopoutState;

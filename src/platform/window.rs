@@ -536,7 +536,41 @@ impl Window {
     /// 下一条消息才会画第一帧。
     pub fn attach(&self, handler: &mut dyn Handler) {
         let ptr: *mut dyn Handler = handler;
+        self.attach_ptr(ptr);
+    }
+
+    /// 同 [`Self::attach`]，但直接收裸指针。
+    ///
+    /// 单独一个入口是为了避开借用冲突：调用方常常是"窗口所属的那个结构体
+    /// 自己"（`self.window.attach(self)`），那样会同时产生对 `self.window`
+    /// 的不可变借用和对 `self` 的可变借用。先在外面把指针拿出来即可。
+    ///
+    /// # Safety
+    ///
+    /// `ptr` 必须指向一个活得比窗口久、且**地址稳定**的 `Handler`。
+    pub fn attach_ptr(&self, ptr: *mut dyn Handler) {
         let _ = with_ctx(self.hwnd, |ctx| ctx.handler = Some(ptr));
+    }
+
+    /// 移动 / 改变窗口位置与尺寸（屏幕物理像素）。
+    ///
+    /// 主窗口不用它：那里拖动标题栏交给系统（`HTCAPTION`），由系统处理 Snap 与
+    /// DWM 阴影。弹出子窗口要**吸附跟随主窗口**，必须由我们主动摆放，
+    /// 所以需要一个显式的设置入口。
+    pub fn set_geometry(&self, g: Geometry) {
+        // SWP_NOZORDER：不改 Z 序，否则吸附跟随会把主窗口压到下面。
+        // SWP_NOACTIVATE：不抢焦点，否则主窗口一移动焦点就跳到弹出窗口上。
+        let _ = unsafe {
+            SetWindowPos(
+                self.hwnd,
+                None,
+                g.x.unwrap_or(0),
+                g.y.unwrap_or(0),
+                g.width.max(1),
+                g.height.max(1),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
     }
 
     /// 标记为主窗口。只影响 `WM_DESTROY` 时是否结束消息循环。
