@@ -33,6 +33,15 @@ pub fn open(target: &Path) -> Result<()> {
     )
 }
 
+/// 用系统默认浏览器打开一个网址。
+///
+/// **单独一个函数而不是复用 `open`**：`open` 收的是 `&Path`，把网址塞进
+/// `Path` 在这条路径上"恰好也能用"（字符串最终都是交给 `ShellExecuteW`），
+/// 但读代码的人会以为这里在操作文件系统。
+pub fn open_url(url: &str) -> Result<()> {
+    execute(OsStr::new(url), "open", None, None)
+}
+
 /// 打开一个 `.lnk`。`resolved_target` 是它解析出的目标路径（shell 命名空间项为空）。
 ///
 /// **目标是文件系统文件夹时必须绕开 shell。**

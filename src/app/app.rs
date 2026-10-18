@@ -51,6 +51,9 @@ struct Strings {
     setting_hotkey: String,
     /// 设置面板右下角「使用说明」按钮的文字
     settings_help: String,
+    /// 底部按钮：退出程序 / 关于更新
+    settings_exit_program: String,
+    settings_about_update: String,
 }
 
 /// 只扫程序自己的快捷方式目录。
@@ -395,6 +398,8 @@ impl Strings {
             setting_theme_custom: i18n.t("settings.theme_custom").to_string(),
             setting_hotkey: i18n.t("settings.hotkey").to_string(),
             settings_help: i18n.t("settings.help").to_string(),
+            settings_exit_program: i18n.t("settings.exit_program").to_string(),
+            settings_about_update: i18n.t("settings.about_update").to_string(),
         }
     }
 }
@@ -468,8 +473,20 @@ pub struct App {
     hover_setting_row: Option<usize>,
     /// 鼠标悬停在设置面板的关闭按钮
     hover_settings_close: bool,
-    /// 鼠标是否停在设置面板右下角的「使用说明」按钮上
-    hover_settings_help: bool,
+    /// 鼠标停在设置面板底部第几个按钮上（`None` = 都不在）。
+    ///
+    /// 用下标而不是三个布尔：三个按钮是同一排平级控件，按下标处理
+    /// 命中判断与悬停只写一遍，加/减按钮也不会漏改某处。
+    hover_settings_button: Option<usize>,
+
+    /// 用户已经**明确要求退出**（托盘右键菜单的「退出」、或设置面板的
+    /// 「退出程序」）。置位后 `on_close_request` 不再把关闭解释成"收进托盘"。
+    ///
+    /// 需要这个标志，是因为"关闭窗口"在这类常驻托盘的程序里有两种含义：
+    /// 点标题栏的 × 是收进托盘，**明确点退出才是真退出**。
+    /// 两者最终都走 `WM_CLOSE`，只能靠这个标志区分 ——
+    /// 不区分就是先前那个 bug：托盘菜单点「退出」只是把窗口藏了起来。
+    exit_requested: bool,
 
     /// 右键菜单。`Some` 表示菜单正展开。
     ///
@@ -762,7 +779,8 @@ impl App {
             settings_open: false,
             hover_setting_row: None,
             hover_settings_close: false,
-            hover_settings_help: false,
+            hover_settings_button: None,
+            exit_requested: false,
             menu: None,
             menu_hover: None,
             editing: None,
@@ -1395,6 +1413,35 @@ impl App {
             }
         }
         Some(path)
+    }
+
+    /// 明确退出程序：置上标志再走正常的 `WM_CLOSE` 流程。
+    ///
+    /// **必须走 `WM_CLOSE` 而不是直接 `DestroyWindow`**：那条路径上还有
+    /// 摘托盘图标、写回窗口几何、`PostQuitMessage` 等收尾动作，
+    /// 绕过去会留下幽灵托盘图标和丢失的窗口位置。
+    ///
+    /// 放在 `impl App` 里而不是 `impl Handler`：它是本程序自己的动作，
+    /// 不是窗口层要求实现的回调。
+    fn request_exit(&mut self) {
+        self.exit_requested = true;
+        self.window.close();
+    }
+
+    /// 「关于更新」：用默认浏览器打开项目的发布页。
+    ///
+    /// 程序里**没有**自动更新机制（那需要联网拉清单、校验、替换自身，
+    /// 对一个便携小工具来说是过度设计）。所以这个按钮做的是它能诚实做到的事：
+    /// 把"去哪儿看有没有新版"直接送到浏览器，用户自己判断要不要下载替换。
+    ///
+    /// 不联网、不检查、不提示 —— 按钮上写着"关于更新"，点开就是更新信息页。
+    fn open_about(&mut self) {
+        const RELEASES: &str = "https://github.com/heiheids/quick-spin/releases";
+        diag("open_about 开始");
+        match crate::shell::launch::open_url(RELEASES) {
+            Ok(()) => diag("open_about: shell 已返回成功"),
+            Err(e) => diag(&format!("open_about: 打开失败 {e}")),
+        }
     }
 
     /// 打开使用说明（没有就先生成一份）。
@@ -2328,8 +2375,13 @@ impl App {
                     &self.strings.setting_theme_custom,
                     self.hover_setting_row,
                     self.hover_settings_close,
-                    &self.strings.settings_help,
-                    self.hover_settings_help,
+                    [
+                        &self.strings.settings_exit_program,
+                        &self.strings.settings_about_update,
+                        &self.strings.settings_help,
+                    ],
+                    self.hover_settings_button,
+                    self.layout.settings_button_level,
                 )?;
             }
         }
@@ -3396,10 +3448,20 @@ impl App {
                 self.settings_open = false;
                 return true;
             }
-            // 右下角「使用说明」：打开同目录下的说明文本。
-            // **不关闭面板** —— 用户看完文档多半还要接着调设置。
-            if self.layout.settings_help.contains(lx, ly) {
-                self.open_help_doc();
+            // 底部一排按钮（左→右：退出程序 / 关于更新 / 使用说明）。
+            // **都不关闭面板**，除了退出：看完文档、点了关于，多半还要接着调设置；
+            // 而"退出程序"本来就要把整个界面收掉。
+            if let Some(i) = self
+                .layout
+                .settings_buttons
+                .iter()
+                .position(|r| r.contains(lx, ly))
+            {
+                match i {
+                    0 => self.request_exit(),
+                    1 => self.open_about(),
+                    _ => self.open_help_doc(),
+                }
                 return true;
             }
             if let Some(row) = self
@@ -3929,13 +3991,17 @@ impl App {
                 .iter()
                 .position(|r| r.contains(lx, ly));
             let close = self.layout.settings_close.contains(lx, ly);
-            let help = self.layout.settings_help.contains(lx, ly);
+            let button = self
+                .layout
+                .settings_buttons
+                .iter()
+                .position(|r| r.contains(lx, ly));
             let changed = row != self.hover_setting_row
                 || close != self.hover_settings_close
-                || help != self.hover_settings_help;
+                || button != self.hover_settings_button;
             self.hover_setting_row = row;
             self.hover_settings_close = close;
-            self.hover_settings_help = help;
+            self.hover_settings_button = button;
             return changed;
         }
 
@@ -3997,7 +4063,7 @@ impl Handler for App {
             Event::TrayRightClick => {
                 let visible = self.window.is_visible();
                 match crate::platform::tray::show_context_menu(self.window.hwnd(), visible) {
-                    Some(crate::platform::tray::command::EXIT) => self.window.close(),
+                    Some(crate::platform::tray::command::EXIT) => self.request_exit(),
                     Some(crate::platform::tray::command::SHOW) => self.window.show(),
                     Some(crate::platform::tray::command::HIDE) => self.window.hide(),
                     _ => {}
@@ -4043,14 +4109,14 @@ impl Handler for App {
                     || self.hover_settings
                     || self.hover_setting_row.is_some()
                     || self.hover_settings_close
-                    || self.hover_settings_help;
+                    || self.hover_settings_button.is_some();
                 self.hover_caption = None;
                 self.hover_tab = None;
                 self.hover_tile = None;
                 self.hover_settings = false;
                 self.hover_setting_row = None;
                 self.hover_settings_close = false;
-                self.hover_settings_help = false;
+                self.hover_settings_button = None;
                 changed
             }
             Event::Destroyed => {
@@ -4099,8 +4165,19 @@ impl Handler for App {
     }
 
     fn on_close_request(&mut self) -> CloseAction {
+        // **明确要求退出时一律真退出**，不再走"收进托盘"。
+        //
+        // 托盘右键菜单的「退出」和设置面板的「退出程序」都会先置上这个标志；
+        // 少了它，这两个入口都会退化成"把窗口藏起来" ——
+        // 用户点了退出、窗口消失、进程还在，只能去任务管理器结束，
+        // 这正是先前的实际表现。
+        if self.exit_requested {
+            return CloseAction::Exit;
+        }
+
         // 有托盘图标时，关闭只是**收进托盘**，不是退出 ——
-        // 这是"最小化进托盘"这类程序的通行语义。真正退出走托盘右键菜单。
+        // 这是"最小化进托盘"这类程序的通行语义。真正退出走托盘右键菜单
+        // 或设置面板的「退出程序」（两者都会置 `exit_requested`）。
         //
         // 没有托盘图标时（用户在配置里关了）必须真的退出，
         // 否则窗口一藏就再也叫不出来了。

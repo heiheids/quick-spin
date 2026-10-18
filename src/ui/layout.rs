@@ -116,10 +116,19 @@ const SETTINGS_MARGIN: i32 = 12;
 const SETTINGS_CLOSE: i32 = 30;
 /// 设置项距面板左右边缘
 const SETTINGS_ROW_INSET: i32 = 14;
-/// 「使用说明」按钮的尺寸与贴边距离（右下角）
-const SETTINGS_HELP_W: i32 = 96;
-const SETTINGS_HELP_H: i32 = 30;
-const SETTINGS_HELP_MARGIN: i32 = 16;
+/// 底部按钮：理想宽度、两档更小的宽度、下限宽度
+const SETTINGS_BTN_W: i32 = 96;
+const SETTINGS_BTN_W_MID: i32 = 84;
+const SETTINGS_BTN_W_MIN: i32 = 68;
+/// 底部按钮高度：正常 / 中等 / 最小
+const SETTINGS_BTN_H: i32 = 30;
+const SETTINGS_BTN_H_MID: i32 = 28;
+const SETTINGS_BTN_H_MIN: i32 = 26;
+/// 底部按钮之间的间距：标准 / 紧凑
+const SETTINGS_BTN_GAP: i32 = 12;
+const SETTINGS_BTN_GAP_MIN: i32 = 6;
+/// 底部按钮距面板左右与下边缘
+const SETTINGS_BTN_MARGIN: i32 = 16;
 /// 第一个设置项距面板顶部的距离（让出标题行）
 const SETTINGS_ROWS_TOP: i32 = 58;
 /// 设置项行高
@@ -239,11 +248,16 @@ pub struct Layout {
     pub settings_panel: RectI,
     /// 设置面板的关闭按钮
     pub settings_close: RectI,
-    /// 设置面板右下角的「使用说明」按钮。
+    /// 设置面板底部的一排按钮：**退出程序 / 关于更新 / 使用说明**。
     ///
-    /// 单独一个按钮、而不是并进设置项列表：它不改变任何设置，只是打开一份
-    /// 文档。和开关混在一起会让人以为点它会改什么。
-    pub settings_help: RectI,
+    /// 顺序即左→右。放在底部一排而不是并进设置项列表：它们都不改变任何设置
+    ///（两个是动作、一个是打开文档），和开关混在一起会让人以为点它们会改什么。
+    pub settings_buttons: [RectI; 3],
+    /// 底部按钮的紧凑档位：`0` 正常，`1`/`2`/`3` 依次更小。
+    ///
+    /// 布局层只给出档位、不给出字号：`Role` 属于绘制层，布局层不该依赖它。
+    /// 绘制层按档位选一个更小的文本角色（见 `settings.rs`）。
+    pub settings_button_level: u8,
     /// 每个设置项的行矩形，顺序与界面上的项一致
     /// 设置面板里的基础色色块，按行铺开。
     pub settings_swatches: Vec<RectI>,
@@ -397,13 +411,40 @@ impl Layout {
             SETTINGS_CLOSE,
             SETTINGS_CLOSE,
         );
-        // 右下角的「使用说明」按钮。贴在面板内沿，留一圈和别处一致的边距。
-        let settings_help = RectI::new(
-            settings_panel.x + settings_panel.w - SETTINGS_HELP_W - SETTINGS_HELP_MARGIN,
-            settings_panel.y + settings_panel.h - SETTINGS_HELP_H - SETTINGS_HELP_MARGIN,
-            SETTINGS_HELP_W,
-            SETTINGS_HELP_H,
-        );
+        // ---- 底部一排按钮：退出程序 / 关于更新 / 使用说明 ----
+        //
+        // 需求："三个按钮均匀分布，如果放不下适当缩小按钮和字体。"
+        //
+        // "均匀分布"取**等宽 + 等间距**：三个按钮等宽，按钮之间、以及整组
+        // 左右两侧到面板边缘的空白相等。整组**居中**而不是拉满整行 ——
+        // 四个字的按钮拉成 190px 会很空。宽度不够时按档位依次缩：
+        // 缩间距 → 缩按钮与高度 → 缩字号（字号由绘制层按档位选）。
+        let avail = (settings_panel.w - SETTINGS_BTN_MARGIN * 2).max(48);
+        let (gap, btn_w, btn_h, level) = if (avail - SETTINGS_BTN_GAP * 2) / 3 >= SETTINGS_BTN_W {
+            (SETTINGS_BTN_GAP, SETTINGS_BTN_W, SETTINGS_BTN_H, 0u8)
+        } else if (avail - SETTINGS_BTN_GAP * 2) / 3 >= SETTINGS_BTN_W_MID {
+            (SETTINGS_BTN_GAP, SETTINGS_BTN_W_MID, SETTINGS_BTN_H, 1)
+        } else if (avail - SETTINGS_BTN_GAP_MIN * 2) / 3 >= SETTINGS_BTN_W_MIN {
+            (SETTINGS_BTN_GAP_MIN, SETTINGS_BTN_W_MIN, SETTINGS_BTN_H_MID, 2)
+        } else {
+            // 极窄：按可用宽度均分，用最小高度与最小字号。取 40 为绝对下限，
+            // 再小就只是三个色块、点了也不知道是什么。
+            (
+                SETTINGS_BTN_GAP_MIN,
+                ((avail - SETTINGS_BTN_GAP_MIN * 2) / 3).max(40),
+                SETTINGS_BTN_H_MIN,
+                3,
+            )
+        };
+        let group_w = btn_w * 3 + gap * 2;
+        let btn_x0 = settings_panel.x + (settings_panel.w - group_w) / 2;
+        let btn_y = settings_panel.y + settings_panel.h - btn_h - SETTINGS_BTN_MARGIN;
+        let mut settings_buttons = [RectI::default(); 3];
+        for (i, r) in settings_buttons.iter_mut().enumerate() {
+            *r = RectI::new(btn_x0 + i as i32 * (btn_w + gap), btn_y, btn_w, btn_h);
+        }
+        let settings_button_level = level;
+
         let row_width = settings_panel.w - SETTINGS_ROW_INSET * 2;
         let mut settings_rows = Vec::with_capacity(input.settings_rows);
         for i in 0..input.settings_rows {
@@ -476,7 +517,8 @@ impl Layout {
             tile_gap: input.tile_gap,
             settings_panel,
             settings_close,
-            settings_help,
+            settings_buttons,
+            settings_button_level,
             settings_swatches,
             settings_rows,
         }

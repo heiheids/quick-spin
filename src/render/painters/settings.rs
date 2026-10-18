@@ -77,9 +77,10 @@ impl SettingsPainter {
         palette_title: &str,
         hover_row: Option<usize>,
         hover_close: bool,
-        // 右下角「使用说明」按钮的文字与悬停态。
-        help_label: &str,
-        hover_help: bool,
+        // 底部一排按钮（左→右）：标签、当前悬停的是第几个、紧凑档位。
+        button_labels: [&str; 3],
+        hover_button: Option<usize>,
+        button_level: u8,
     ) -> Result<()> {
         let Some(brush) = &self.brush else {
             return Ok(());
@@ -263,22 +264,24 @@ impl SettingsPainter {
             }
         }
 
-        // ---- 右下角「使用说明」按钮 ----
+        // ---- 底部一排按钮：退出程序 / 关于更新 / 使用说明 ----
         //
-        // 不并进上面的设置项列表：它不改变任何设置，只是打开一份文档；
-        // 混在开关里会让人以为点它会改什么。放在右下角是刻意的 ——
-        // 那块地方本来就空着，也不挡色板。
+        // 不并进上面的设置项列表：它们都不改变设置（两个是动作、一个开文档），
+        // 混在开关里会让人以为点它们会改什么。
         if let Some(brush) = &self.brush {
-            let help = layout.settings_help;
-            let help_frame = rounded_i(help, 8.0);
-            // SAFETY: COM 调用；结构体都是本函数栈上的局部量。
-            unsafe {
-                if hover_help {
-                    brush.SetColor(&to_d2d(scheme.tile_hover));
-                    ctx.FillRoundedRectangle(&help_frame, brush);
+            for (i, rect) in layout.settings_buttons.iter().enumerate() {
+                let frame = rounded_i(*rect, 8.0);
+                // SAFETY: COM 调用；结构体都是本函数栈上的局部量。
+                unsafe {
+                    if hover_button == Some(i) {
+                        brush.SetColor(&to_d2d(scheme.tile_hover));
+                        ctx.FillRoundedRectangle(&frame, brush);
+                    }
+                    // 三个按钮都用同一个深色描边。给它们各自的颜色（比如退出用红）
+                    // 会让这一排看起来像三种不同性质的东西，而它们其实是平级的。
+                    brush.SetColor(&to_d2d(scheme.tab_active_border));
+                    ctx.DrawRoundedRectangle(&frame, brush, 1.2, no_style);
                 }
-                brush.SetColor(&to_d2d(scheme.tab_active_border));
-                ctx.DrawRoundedRectangle(&help_frame, brush, 1.2, no_style);
             }
         }
 
@@ -292,18 +295,23 @@ impl SettingsPainter {
         );
         text.draw(ctx, title, Role::Setting, title_rect, scheme.text_primary)?;
 
-        // 「使用说明」按钮上的字。
+        // 底部三个按钮上的字。
         //
-        // 用 `Role::Tab` 而不是 `Role::Setting`：前者的水平与垂直对齐都是
-        // **居中**（见 `text.rs` 的 `alignment()`），按钮上的字要的是居中；
-        // 后者是左对齐，在这个小方框里会贴在左边、显得偏。
-        text.draw(
-            ctx,
-            help_label,
-            Role::Tab,
-            layout.settings_help.as_f32(),
-            scheme.text_primary,
-        )?;
+        // 字号按布局给的**档位**降级，而不是由这里自己看宽度猜：
+        // 宽度是布局算的，阈值只该有一处定义（见 `Layout::compute`）。
+        // 用的都是已有的居中角色，不新增 Role —— 角色一多，
+        // "哪个字号该配哪个场景"就会散到各处。
+        let role = match button_level {
+            0 | 1 => Role::Tab,     // 14.5px
+            2 => Role::Tile,        // 12.5px
+            _ => Role::Caption,     // 11.0px
+        };
+        for (i, rect) in layout.settings_buttons.iter().enumerate() {
+            let Some(label) = button_labels.get(i) else {
+                continue;
+            };
+            text.draw(ctx, label, role, rect.as_f32(), scheme.text_primary)?;
+        }
 
         // 每个设置项的标签
         for (i, row) in layout.settings_rows.iter().enumerate() {
