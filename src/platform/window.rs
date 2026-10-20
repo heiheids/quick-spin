@@ -150,6 +150,14 @@ pub enum Event {
     TrayRightClick,
     /// 全局热键被按下。
     Hotkey,
+    /// 一个 [`Window::set_timeout`] 定时器到点了。
+    ///
+    /// 带 `id` 而不是给每个用途单独一个事件变体：窗口层不该知道上层拿定时器
+    /// 干什么（现在是悬停提示，以后可能是别的），只管"这个号到点了"。
+    ///
+    /// **是一次性事件**：触发后窗口层已经把该定时器杀掉，上层想再来一次
+    /// 必须重新 `set_timeout`。
+    Timer(usize),
     /// 窗口失去了激活状态（用户点了别的程序，或者点了桌面）。
     ///
     /// 轻量浮层（右键菜单）必须靠它来关闭：点在自己窗口之外时，
@@ -643,6 +651,40 @@ impl Window {
     /// 取一个可跨线程使用的重绘凭据。后台任务完成后用它唤醒 UI 线程。
     pub fn redraw_notifier(&self) -> RedrawNotifier {
         RedrawNotifier(self.hwnd.0 as isize)
+    }
+
+    /// 启动一个一次性定时器：`ms` 毫秒后向本窗口投递一次 [`Event::Timer`]。
+    ///
+    /// ## 为什么用定时器而不是在消息循环里轮询
+    ///
+    /// 悬停提示需要"鼠标停住 300ms 后弹出"。用轮询（每帧检查一次时间差）的话，
+    /// 空闲时也得让消息循环醒着 —— 而本程序的铁律是**空闲时一帧都不画**
+    ///（见 `message_loop`：`GetMessageW` 阻塞等待）。
+    /// `SetTimer` 是系统帮我们等，到点才发一条消息，其余时间线程照常睡着。
+    ///
+    /// ## 为什么是"一次性"
+    ///
+    /// `SetTimer` 本身是周期性的，**不**主动 `KillTimer` 就会反复触发。
+    /// 这里每次触发后立刻在 `WM_TIMER` 分支里杀掉它（见那里的说明），
+    /// 于是一个 id 就代表"一次待触发的延迟"。
+    ///
+    /// ## 重复调用
+    ///
+    /// 用**同一个 id** 再调一次会先清掉旧的再设新的，正好是"重新计时"的语义 ——
+    /// 鼠标在方格之间移动时，每个新方格都重置这份倒计时。
+    pub fn set_timeout(&self, id: usize, ms: u32) {
+        // SAFETY: 只向系统登记一个定时器；句柄来自仍然有效的窗口。
+        unsafe {
+            SetTimer(Some(self.hwnd), id, ms, None);
+        }
+    }
+
+    /// 取消 [`Self::set_timeout`] 设的定时器。没设过时调用也安全。
+    pub fn cancel_timeout(&self, id: usize) {
+        // SAFETY: 只是解除登记；未登记时返回 FALSE，忽略即可。
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), id);
+        }
     }
 
     /// 请求重绘一次。**可以从任意线程调用**：内部走 `PostMessage`，
@@ -1150,6 +1192,21 @@ unsafe extern "system" fn wnd_proc(
             } else if crate::platform::tray::is_right_click(mouse) {
                 emit(hwnd, Event::TrayRightClick);
             }
+            return LRESULT(0);
+        }
+
+        // 定时器到点（见 [`Window::set_timeout`]）。
+        //
+        // **必须先杀掉它**：`SetTimer` 是周期性的，不杀就会按同样的间隔
+        // 反复触发 —— 悬停提示会变成"每 300ms 重弹一次"，而且每次重弹都会
+        // 请求一次重绘，空闲时 CPU 再也降不下来。
+        WM_TIMER => {
+            let id = wparam.0;
+            unsafe {
+                let _ = KillTimer(Some(hwnd), id);
+            }
+            emit(hwnd, Event::Timer(id));
+            mark_dirty(hwnd);
             return LRESULT(0);
         }
 

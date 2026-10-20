@@ -1765,6 +1765,251 @@ fn selftest() -> ExitCode {
         );
     }
 
+    // 悬停提示的几何（使用者 2026-10-20："鼠标放在快捷方式上 0.3 秒弹出全名"）。
+    //
+    // 纯几何、不建窗口就能验证。重点钉住三件事：
+    // 1. 提示框必须**完整落在窗口内** —— 画到窗口外的部分看不见，等于提示丢了；
+    // 2. 默认在方格**下方**，下方放不下翻到上方（不能盖住图标本身）；
+    // 3. 宽度随名字增长但**有上限**，否则超长名字会撑出一个跑出窗口的框。
+    {
+        use crate::platform::hittest::RectI;
+        use crate::render::painters::TooltipPainter;
+
+        let mut failures: Vec<String> = Vec::new();
+        let bounds = RectI::new(0, 0, 640, 880);
+
+        // 一个居中的方格
+        let anchor = RectI::new(200, 300, 64, 64);
+
+        // 1. 常规情况：在方格下方、水平居中
+        let f = TooltipPainter::frame(anchor, "很长的程序名字用来触发提示", bounds);
+        if f.y <= anchor.y + anchor.h {
+            failures.push(format!("常规情况下没有放在方格下方: y={}", f.y));
+        }
+        if f.x < bounds.x || f.x + f.w > bounds.x + bounds.w {
+            failures.push("提示框水平越界".to_string());
+        }
+
+        // 2. 窗口底部的方格：下方放不下，必须翻到上方
+        let low = RectI::new(200, 830, 64, 64);
+        let f = TooltipPainter::frame(low, "底部这条", bounds);
+        if f.y + f.h > bounds.y + bounds.h {
+            failures.push(format!(
+                "底部方格下方放不下，提示框越界: y+h={} > {}",
+                f.y + f.h,
+                bounds.y + bounds.h
+            ));
+        }
+        if f.y >= low.y {
+            failures.push("底部方格没有把提示翻到上方".to_string());
+        }
+
+        // 3. 超长名字：宽度有上限，且不越界
+        let long_name: String = "超长".repeat(200);
+        let f = TooltipPainter::frame(anchor, &long_name, bounds);
+        if f.w > 320 {
+            failures.push(format!("提示框宽度没有上限: {}", f.w));
+        }
+        if f.x + f.w > bounds.x + bounds.w || f.x < bounds.x {
+            failures.push("超长名字导致提示框越界".to_string());
+        }
+
+        // 4. 窗口很窄时（方格贴着右边缘）仍不越界
+        let narrow = RectI::new(0, 0, 200, 400);
+        let edge = RectI::new(180, 100, 20, 20);
+        let f = TooltipPainter::frame(edge, "贴边的一条", narrow);
+        if f.x + f.w > narrow.x + narrow.w || f.x < narrow.x {
+            failures.push(format!(
+                "窄窗口里提示框越界: x={} w={} 窗口宽={}",
+                f.x, f.w, narrow.w
+            ));
+        }
+
+        // 5. 截断标记：超长的要带省略号，短的保持原样
+        let fitted = crate::render::painters::tooltip::fit_label(&long_name, 320);
+        if !fitted.ends_with('…') {
+            failures.push("超长名字没有被截断并加省略号".to_string());
+        }
+        if crate::render::painters::tooltip::fit_label("记事本", 320) != "记事本" {
+            failures.push("短名字被改动了".to_string());
+        }
+
+        selftest_line!(
+            "悬停提示   : {}",
+            if failures.is_empty() {
+                "方格下方优先 / 下方放不下翻上方 / 宽度有上限 / 窄窗口不越界 / 截断加省略号 —— 全部通过"
+                    .to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // 每个窗口的图标大小互不干扰（使用者 2026-10-20："每个窗口各自设定"）。
+    //
+    // 规则本体在 `popout::state::PopoutWindow::effective_icon_size`，
+    // 窗口层 `Popout` 实现的是它的等价形式（只有 `Option<u32>`，没有整个状态）。
+    // 这里把**两者必须一致**这件事钉住：将来谁改了一边，自检立刻报出来。
+    {
+        use popout::state::{MAX_ICON, MIN_ICON, PopoutWindow, step_icon};
+
+        let mut failures: Vec<String> = Vec::new();
+
+        // 0 = 跟随主窗口
+        let follow = PopoutWindow::default();
+        if follow.effective_icon_size(64) != 64 {
+            failures.push("没设过的窗口没有跟随主窗口".to_string());
+        }
+
+        // 两个窗口各设各的，互不影响
+        let mut a = PopoutWindow::default();
+        let b = PopoutWindow::default();
+        a.icon_size = 128;
+        if a.effective_icon_size(64) != 128 {
+            failures.push("设过的窗口没有用自己的值".to_string());
+        }
+        if b.effective_icon_size(64) != 64 {
+            failures.push("别的窗口被波及了".to_string());
+        }
+        if a.effective_icon_size(32) != 128 {
+            failures.push("设过的窗口被主窗口的改动带走了".to_string());
+        }
+
+        // `0` 必须能穿过 normalize（否则一启动就永远不再跟随主窗口）
+        let mut w = PopoutWindow::default();
+        w.normalize();
+        if w.icon_size != 0 {
+            failures.push("normalize 把'跟随主窗口'的 0 改掉了".to_string());
+        }
+        w.icon_size = 9999;
+        w.normalize();
+        if w.icon_size != MAX_ICON {
+            failures.push("越界的图标边长没有被收进上限".to_string());
+        }
+        w.icon_size = 1;
+        w.normalize();
+        if w.icon_size != MIN_ICON {
+            failures.push("越界的图标边长没有被收进下限".to_string());
+        }
+
+        // 档位步进：一格一格走，到顶到底停住
+        if step_icon(64, true, 256) != Some(96) || step_icon(64, false, 256) != Some(48) {
+            failures.push("档位步进不对".to_string());
+        }
+        if step_icon(256, true, 256).is_some() || step_icon(16, false, 256).is_some() {
+            failures.push("到达上下限后还能继续走".to_string());
+        }
+
+        selftest_line!(
+            "每窗图标尺寸: {}",
+            if failures.is_empty() {
+                "0=跟随主窗口 / 同窗口各设各的 / 主窗口改动不波及已设过的窗口 / normalize 保住 0 / 档位到顶到底停住 —— 全部通过"
+                    .to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // **图标尺寸按选项卡分开**（使用者 2026-10-20 原话）：
+    //
+    // > 主窗口内选项卡和对应弹出一样尺寸可以，但是不同的选项卡之间必须分开。
+    //
+    // 这是上一条的**语义更正**：早先按"窗口"存，于是主窗口一个值、每个弹窗
+    // 各一个值，切选项卡时主窗口不跟着换 —— 表现就是"还是全部同步大小"。
+    // 现在按选项卡 key 存，主窗口与它的弹窗读同一个键。
+    {
+        use crate::state::AppState;
+
+        let mut failures: Vec<String> = Vec::new();
+        let mut s = AppState {
+            icon_size: 64,
+            ..Default::default()
+        };
+
+        // 没设过的选项卡用兜底值
+        if s.icon_size_of("tab2") != 64 || s.icon_size_of("tab3") != 64 {
+            failures.push("没设过的选项卡没有用兜底值".to_string());
+        }
+
+        // 给 tab2 设一个：tab3 与主界面**不许**受影响
+        s.set_icon_size("tab2", 128);
+        if s.icon_size_of("tab2") != 128 {
+            failures.push("tab2 自己的值没生效".to_string());
+        }
+        if s.icon_size_of("tab3") != 64 {
+            failures.push("改 tab2 波及了 tab3（这就是那条 bug）".to_string());
+        }
+        if s.icon_size_of("main") != 64 {
+            failures.push("改 tab2 波及了主界面".to_string());
+        }
+
+        // 再给 tab3 另一个值，两者独立
+        s.set_icon_size("tab3", 32);
+        if s.icon_size_of("tab2") != 128 || s.icon_size_of("tab3") != 32 {
+            failures.push("两个选项卡的值没有各自独立".to_string());
+        }
+
+        // 改回兜底值 -> 记录应当消失（不让状态文件无限增长）
+        s.set_icon_size("tab2", 64);
+        if s.icon_sizes.contains_key("tab2") {
+            failures.push("改回默认值后记录还在".to_string());
+        }
+
+        selftest_line!(
+            "图标尺寸归属: {}",
+            if failures.is_empty() {
+                "按选项卡分开 / 主界面与各选项卡互不影响 / 没设过用兜底值 / 改回默认值清掉记录 —— 全部通过"
+                    .to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
+    // 滚轮必须先判断"鼠标在不在自己身上"（使用者 2026-10-20："图标还是统一变化"）。
+    //
+    // `WM_MOUSEWHEEL` 发给**焦点窗口**，不是鼠标下面的窗口。主窗口是唯一持有焦点的
+    // 那个，所以在弹窗上滚轮时主窗口也会收到 —— 不做落点判断就会两边一起改。
+    // 这里验证那个判据本身（纯函数，不需要建窗口）。
+    {
+        let mut failures: Vec<String> = Vec::new();
+
+        // 判据：坐标必须落在自己的客户区里（含左上、不含右下，与 RectI::contains 同口径）
+        let inside = |x: i32, y: i32, w: i32, h: i32| x >= 0 && y >= 0 && x < w && y < h;
+
+        // 实测得到的真实数字：鼠标停在弹窗(x=500,w=300)上时，
+        // 主窗口(x=100,w=300) 收到的换算坐标是 (443,93) —— 落在自己 300 宽之外。
+        if inside(443, 93, 300, 300) {
+            failures.push("误投到主窗口的滚轮坐标被判成'在自己身上'".to_string());
+        }
+        // 同一个消息在弹窗里换算是 (43,93)，落在自己身上
+        if !inside(43, 93, 300, 300) {
+            failures.push("真的落在弹窗上的滚轮坐标没有被认出来".to_string());
+        }
+        // 边界：左上角算在内、右下角在外
+        if !inside(0, 0, 300, 300) {
+            failures.push("左上角应当算在窗口内".to_string());
+        }
+        if inside(300, 300, 300, 300) {
+            failures.push("右下角应当算在窗口外".to_string());
+        }
+        // 负数（鼠标在窗口左上方）也必须算在外面
+        if inside(-1, 50, 300, 300) || inside(50, -1, 300, 300) {
+            failures.push("负坐标应当算在窗口外".to_string());
+        }
+
+        selftest_line!(
+            "滚轮落点   : {}",
+            if failures.is_empty() {
+                "只认落在自己客户区里的滚轮 / 误投的坐标被拒 / 负坐标与右下角算在外 —— 全部通过"
+                    .to_string()
+            } else {
+                format!("⚠ {} 项不通过: {}", failures.len(), failures.join("；"))
+            }
+        );
+    }
+
     // 窗口外框的圆角：系统偏好与面板半径必须**同源**。
     //
     // 这条规则被三处消费（主窗口的 `acrylic::apply`、主窗口面板绘制、

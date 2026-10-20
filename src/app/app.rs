@@ -211,6 +211,13 @@ impl Marquee {
 /// 判定"这是一次框选"所需的最小拖动距离（逻辑像素）。与方格拖拽同一量级。
 const MARQUEE_MIN: i32 = 3;
 
+/// 悬停提示的定时器编号。
+///
+/// 每个窗口一份定时器表，所以这里只要在本窗口内唯一即可。
+/// 不用 0：`SetTimer` 的 id 为 0 是"用系统分配的号"，
+/// 那样我们拿不到它，也就没法主动取消。
+const TOOLTIP_TIMER_ID: usize = 1;
+
 /// 使用说明的文件名。落在**程序同目录**（便携布局）。
 const HELP_FILE: &str = "使用说明.txt";
 
@@ -410,6 +417,8 @@ pub struct App {
     grid: GridPainter,
     settings: SettingsPainter,
     menu_painter: MenuPainter,
+    /// 悬停提示（鼠标停住 0.3 秒显示完整名称）。
+    tooltip: crate::render::painters::TooltipPainter,
     text: TextEngine,
     /// 图标位图缓存，按字节预算做 LRU 淘汰
     icons: IconCache,
@@ -456,6 +465,21 @@ pub struct App {
     hover_tab: Option<usize>,
     hover_tile: Option<usize>,
     hover_settings: bool,
+    /// 悬停提示当前显示的是哪一条（`None` = 不显示）。
+    ///
+    /// 它与 `hover_tile` **不是**一回事：鼠标一移到方格上 `hover_tile` 立刻变，
+    /// 而提示要等停住 0.3 秒才出现。中间那段时间提示还不该显示，
+    /// 所以必须单独一个字段存"提示已经确认显示了哪一条"。
+    ///
+    /// 存条目下标（`self.visible` 的下标）而不是名字：名字会随"重命名"变，
+    /// 而这个字段只在一次悬停期间有效，移动/离开就清空。
+    tooltip_tile: Option<usize>,
+    /// 倒计时**正在进行**、等它到点弹出的是哪一条。
+    ///
+    /// 与 [`Self::tooltip_tile`] 分开：那个是"已经在显示"，这个是"还没到点"。
+    /// 到点时要比对它是否仍然等于当前悬停项 —— 鼠标可能在定时器消息排队期间
+    /// 已经移走了（消息是异步的，两者不是同一时刻的真相）。
+    tooltip_pending: Option<usize>,
     /// 设置面板是否展开
     settings_open: bool,
     /// 鼠标悬停在设置面板的第几项
@@ -691,15 +715,22 @@ impl App {
             );
         }
 
-        let icon_size = if saved.icon_size > 0 {
-            saved.icon_size
-        } else {
-            cfg.layout.icon_size
-        };
         let active_tab = tabs
             .iter()
             .position(|t| t.key == saved.active_tab)
             .unwrap_or(0);
+
+        // 图标尺寸**按当前选项卡**取（使用者 2026-10-20）：
+        // 主窗口切到 tab2 与 tab2 的弹窗是同一个分组，共用一份尺寸。
+        let active_key = tabs.get(active_tab).map(|t| t.key.as_str()).unwrap_or("");
+        let icon_size = {
+            let per_tab = saved.icon_size_of(active_key);
+            if per_tab > 0 {
+                per_tab
+            } else {
+                cfg.layout.icon_size
+            }
+        };
 
         let (dip_w, dip_h) = renderer.dip_size();
         // 开了发光就要给发光留边距；关掉发光则面板铺满窗口，
@@ -766,6 +797,7 @@ impl App {
             grid: GridPainter::new(),
             settings: SettingsPainter::new(),
             menu_painter: MenuPainter::new(),
+            tooltip: crate::render::painters::TooltipPainter::new(),
             text: TextEngine::new()?,
             icons: IconCache::new(ICON_BUDGET),
             loader: Loader::spawn(window.redraw_notifier()),
@@ -789,6 +821,8 @@ impl App {
             hover_caption: None,
             hover_tab: None,
             hover_tile: None,
+            tooltip_tile: None,
+            tooltip_pending: None,
             hover_settings: false,
             settings_open: false,
             hover_setting_row: None,
@@ -1601,11 +1635,38 @@ impl App {
         // 那个理由在窗口开始持有它之后就不成立了，而保留会让用户选的颜色
         // 被静默丢弃：当时生效、重启就没了。
         let merged = crate::popout::state::PopoutWindow::merge_persisted(fresh, &old);
-        if merged == old {
+        let mut changed = false;
+
+        // **尺寸归选项卡，不归窗口**（使用者 2026-10-20）。
+        //
+        // `merged.icon_size` 是窗口层手里那份镜像；真正权威的存储在
+        // `state.icon_sizes[<选项卡 key>]`。这里把它同步过去 ——
+        // 这样"在弹窗上滚轮"改的是那个选项卡，主窗口切到同一选项卡也跟着变，
+        // 而其它选项卡不受影响。
+        if merged.icon_size != 0
+            && self.state.get().icon_size_of(key) != merged.icon_size
+        {
+            self.state.get_mut().set_icon_size(key, merged.icon_size);
+            changed = true;
+            // 主窗口正显示的就是这个选项卡 → 主窗口也要跟着改。
+            if self
+                .tabs
+                .get(self.active_tab)
+                .is_some_and(|t| t.key == key)
+            {
+                self.icon_size = merged.icon_size;
+                self.rebuild_layout();
+            }
+        }
+
+        if merged == old && !changed {
             return false;
         }
-        self.state.get_mut().popout.set(key, merged);
-        true
+        if merged != old {
+            self.state.get_mut().popout.set(key, merged);
+            changed = true;
+        }
+        changed
     }
 
     /// 主窗口所在矩形（屏幕物理像素）。
@@ -1924,6 +1985,21 @@ impl App {
                 dock_side: saved.dock_side,
                 pinned: saved.pinned,
             },
+            // 这个窗口自己的图标边长（`None` = 跟随主窗口/配置）。
+            //
+            // **取选项卡记录里的值**，不是窗口记录里的：尺寸归选项卡
+            //（使用者 2026-10-20）。恢复窗口时用同一份，于是"上次在弹窗上调过
+            // 大小"重启后主窗口切到该选项卡也还是那个大小。
+            {
+                let per_tab = self.state.get().icon_size_of(tab_key);
+                let v = if per_tab > 0 {
+                    per_tab
+                } else {
+                    self.icon_size
+                };
+                Some(v)
+            },
+            self.cfg.layout.icon_size_max,
         ) {
             Ok(p) => {
                 // **必须先装箱、再 attach。顺序反了就是悬垂指针。**
@@ -3001,6 +3077,40 @@ impl App {
                 &scheme,
                 self.menu_hover,
             )?;
+        }
+
+        // ---- 悬停提示：盖在最上面 ----
+        //
+        // 放在菜单之后：菜单是"用户正在操作"的东西，提示只是被动显示的信息，
+        // 两者万一重叠，操作面板必须在上（提示挡在菜单项上会让人点不中）。
+        if let Some(index) = self.tooltip_tile {
+            // `tooltip_tile` 与 `tile_labels` **同一个口径**（都是可见下标），
+            // 而 `layout.tiles` 是从 `first_item` 起的局部数组，所以要减掉偏移。
+            if let Some(local) = index.checked_sub(first) {
+                if let (Some(label), Some(anchor)) =
+                    (tile_labels.get(local), self.layout.tiles.get(local))
+                {
+                    // 只在**名称确实被截断**时才弹：名字完整可见时弹一个一模一样的
+                    // 框出来纯属打扰。判据是估算文字宽度超过格子的可用宽度。
+                    let text_w = label.chars().count() as f32
+                        * crate::render::painters::tooltip::CHAR_WIDTH as f32;
+                    let avail_w = anchor.w as f32 - 2.0 * TILE_PADDING;
+                    if text_w > avail_w {
+                        let bounds = self.logical_window_rect();
+                        let frame =
+                            crate::render::painters::TooltipPainter::frame(*anchor, label, bounds);
+                        let fitted = crate::render::painters::tooltip::fit_label(label, frame.w);
+                        self.tooltip.ensure(self.renderer.context())?;
+                        self.tooltip.draw(
+                            self.renderer.context(),
+                            &mut self.text,
+                            frame,
+                            &fitted,
+                            &scheme,
+                        )?;
+                    }
+                }
+            }
         }
 
         // 拖动尺寸期间不等垂直同步：模态尺寸循环里每帧阻塞一个刷新周期
@@ -4457,6 +4567,15 @@ impl App {
         self.active_tab = index;
         // 换选项卡后内容全变了，滚动位置留着会让用户以为"卡在中间"
         self.scroll = 0.0;
+        // **换选项卡要换图标尺寸**（使用者 2026-10-20：不同选项卡之间必须分开）。
+        // 每个选项卡各记一份，切过去就读它那一份；没设过则回落到配置默认值。
+        let key = self.tabs[index].key.clone();
+        let per_tab = self.state.get().icon_size_of(&key);
+        self.icon_size = if per_tab > 0 {
+            per_tab
+        } else {
+            self.cfg.layout.icon_size
+        };
         self.refresh_view();
     }
 
@@ -4464,35 +4583,83 @@ impl App {
     ///
     /// **量化档位**而不是逐像素连续变化：每个不同的边长都意味着一份新的图标位图，
     /// 连续变化会让缓存瞬间塞满几十种尺寸，内存不可控（见架构设计 §7）。
+    ///
+    /// 档位表与步进规则**只有一处定义**（`popout::state::step_icon`）：
+    /// 弹出子窗口在自己的窗口上滚轮时调的是同一个函数，于是"能调到多大"
+    /// 不会出现两套说法。
     fn step_icon_size(&mut self, bigger: bool) -> bool {
-        /// 允许的图标边长档位。
-        ///
-        /// 最低 16：再小图标就看不出是什么了，但用户明确要求能缩到当前最小的一半，
-        /// 用来在一屏里塞下尽量多的条目。
-        const STEPS: &[u32] = &[16, 24, 32, 48, 64, 96, 128, 192, 256];
-
-        let max = self.cfg.layout.icon_size_max.max(32);
-        let current = self.icon_size;
-
-        let next = if bigger {
-            STEPS.iter().copied().find(|&s| s > current && s <= max)
-        } else {
-            STEPS.iter().rev().copied().find(|&s| s < current)
-        };
-
-        match next {
-            Some(value) => {
-                self.icon_size = value;
-                self.rebuild_layout();
-                true
-            }
+        let Some(value) = crate::popout::state::step_icon(
+            self.icon_size,
+            bigger,
+            self.cfg.layout.icon_size_max,
+        ) else {
             // 已经到顶/到底，不动也不重绘
-            None => false,
+            return false;
+        };
+        self.icon_size = value;
+
+        // **写到当前选项卡名下**（使用者 2026-10-20：不同选项卡之间必须分开）。
+        //
+        // 主窗口与"这个选项卡的弹出子窗口"读同一个键，所以两边永远一致；
+        // 换个选项卡再滚轮，改的是那个选项卡自己那份，互不干扰。
+        let key = self
+            .tabs
+            .get(self.active_tab)
+            .map(|t| t.key.clone())
+            .unwrap_or_default();
+        if !key.is_empty() {
+            self.state.get_mut().set_icon_size(&key, value);
+            if let Err(e) = self.state.save() {
+                eprintln!("保存选项卡图标尺寸失败: {e}");
+            }
+            // 主窗口那个选项卡的弹窗要跟着变（它们是同一分组）。
+            self.push_icon_size_to_popouts(&key, value);
+        }
+
+        self.rebuild_layout();
+        true
+    }
+
+    /// 把某个选项卡的图标尺寸推给它**已经打开的**弹窗。
+    ///
+    /// 只推给 key 匹配的那一个：其它选项卡的弹窗各用各的尺寸。
+    fn push_icon_size_to_popouts(&mut self, tab_key: &str, size: u32) {
+        if let Some(p) = self.popouts.get_mut(tab_key) {
+            if p.set_own_icon_size(size) {
+                p.request_redraw();
+            }
         }
     }
 
     /// 处理滚轮：`Ctrl` 改图标尺寸，否则滚动内容。
+    ///
+    /// # 必须先判断"鼠标在不在我身上"（2026-10-20）
+    ///
+    /// `WM_MOUSEWHEEL` 并不是"发给鼠标下面的窗口"，而是发给**焦点窗口**。
+    /// 我们的主窗口是唯一拿焦点的窗口（弹窗是 `WS_EX_TOOLWINDOW`，正常操作下
+    /// 不抢焦点），于是一旦焦点在主窗口上，**在弹窗上滚轮时主窗口也会收到这条
+    /// 消息**。实测（两个窗口、鼠标停在弹窗上）：
+    ///
+    /// ```text
+    /// [主窗口] 收到 WM_MOUSEWHEEL  换算后坐标=(443,93)  在自己身上=false
+    /// [弹窗  ] 收到 WM_MOUSEWHEEL  换算后坐标=(43,93)   在自己身上=true
+    /// ```
+    ///
+    /// 消息里的坐标是**屏幕坐标**，`ScreenToClient` 换算之后会落到自己坐标系里的
+    /// 某处 —— 所以"坐标在窗口内"这个判断必须由**每个窗口各自**对**屏幕坐标**做，
+    /// 不能依赖换算结果（换算永远成功，结果永远"在某处"）。
+    ///
+    /// 不做这一步的症状正是使用者报的："图标还是统一变化，没有独立开"——
+    /// 在弹窗上滚轮，弹窗改了、主窗口也跟着改了，于是所有窗口看起来一起变。
     fn on_wheel(&mut self, x: i32, y: i32, delta: i32, ctrl: bool) -> bool {
+        // `x` / `y` 已经由窗口层换算成**本窗口客户区**坐标，
+        // 所以这里判断"是否落在自己的客户区里"就够了。
+        let (cw, ch) = self.window.client_size();
+        if x < 0 || y < 0 || x >= cw || y >= ch {
+            // 消息是误投过来的（鼠标其实在别的窗口上）—— 交给那个窗口去处理。
+            return false;
+        }
+
         if ctrl {
             return self.step_icon_size(delta > 0);
         }
@@ -4700,6 +4867,20 @@ impl App {
         let tile = self.layout.tile_at(lx, ly);
         let settings = self.layout.settings_at(lx, ly);
 
+        // **必须在赋值之前记下旧的悬停项**。
+        //
+        // 这里曾经把"变了没有"的比较写在赋值**之后**：
+        //
+        // ```ignore
+        // if changed { self.hover_tile = tile; }
+        // if tile != self.hover_tile { restart_timer(tile) }   // 永远相等！
+        // ```
+        //
+        // 赋值之后 `self.hover_tile` 已经是 `tile`，那个比较恒为假，
+        // 于是**倒计时从来没被设过**——悬停提示一次都不会出现
+        //（使用者 2026-10-20："悬停名字显示也没有"）。
+        let prev_tile = self.hover_tile;
+
         let changed = caption != self.hover_caption
             || tab != self.hover_tab
             || tile != self.hover_tile
@@ -4711,7 +4892,41 @@ impl App {
             self.hover_tile = tile;
             self.hover_settings = settings;
         }
+
+        // ---- 悬停提示的计时 ----
+        //
+        // 判据是"悬停的方格变了没有"，不是"鼠标动了没有"：
+        // 在**同一格**上继续移动不该重置倒计时（否则手一直抖就永远等不到提示）。
+        //
+        // 用赋值**之前**的 `prev_tile` 比较（见上面的说明）。
+        if tile != prev_tile {
+            self.restart_tooltip_timer(tile);
+        }
         changed
+    }
+
+    /// 悬停目标变了：清掉旧提示，并为新方格重新计时。
+    ///
+    /// `None` = 鼠标不在任何方格上 → 立刻收起提示、取消倒计时。
+    fn restart_tooltip_timer(&mut self, tile: Option<usize>) {
+        // 先收起当前提示（换格子或离开时，旧提示必须马上消失，
+        // 否则会出现"指着一个方格、显示的是上一个的名字"）。
+        let had_tooltip = self.tooltip_tile.take().is_some();
+
+        match tile {
+            Some(index) => {
+                // 同一个 id 再设一次 = 重新计时（见 `Window::set_timeout`）。
+                self.window
+                    .set_timeout(TOOLTIP_TIMER_ID, crate::render::painters::tooltip::DELAY_MS);
+                // 记下"待弹出的那一条"。到点时据此确认鼠标还在不在原格上。
+                self.tooltip_pending = Some(index);
+            }
+            None => {
+                self.window.cancel_timeout(TOOLTIP_TIMER_ID);
+                self.tooltip_pending = None;
+            }
+        }
+        let _ = had_tooltip;
     }
 }
 
@@ -4814,6 +5029,26 @@ impl Handler for App {
                 changed
             }
             Event::MouseMove { x, y } => self.on_mouse_move(x, y),
+            // 定时器到点。目前只有悬停提示用它。
+            Event::Timer(id) => {
+                if id != TOOLTIP_TIMER_ID {
+                    return false;
+                }
+                // 到点时必须**再确认一次**鼠标还停在那一条上。
+                //
+                // 定时器消息是异步排队的：从"设下倒计时"到"消息被处理"之间，
+                // 鼠标可能已经移到别处（那次移动的消息可能还排在队列前面没处理完，
+                // 也可能鼠标只是移出了某一格而仍在窗口内）。
+                // 不确认的话，用户只是路过一格也会在 0.3 秒后看到提示。
+                let pending = self.tooltip_pending.take();
+                match (pending, self.hover_tile) {
+                    (Some(want), Some(now)) if want == now => {
+                        self.tooltip_tile = Some(now);
+                        true
+                    }
+                    _ => false,
+                }
+            }
             Event::MouseLeave => {
                 // 方格拖拽在鼠标离开窗口时**取消**，而不是留着。
                 //
@@ -4836,7 +5071,13 @@ impl Handler for App {
                     || self.hover_settings
                     || self.hover_setting_row.is_some()
                     || self.hover_settings_close
-                    || self.hover_settings_button.is_some();
+                    || self.hover_settings_button.is_some()
+                    || self.tooltip_tile.is_some();
+                // 鼠标离开窗口：提示必须立刻消失（使用者要求"移走光标自动消失"），
+                // 倒计时也要停掉 —— 否则它会拖到下一次进入时凭空弹出来。
+                self.window.cancel_timeout(TOOLTIP_TIMER_ID);
+                self.tooltip_pending = None;
+                self.tooltip_tile = None;
                 self.hover_caption = None;
                 self.hover_tab = None;
                 self.hover_tile = None;

@@ -17,6 +17,89 @@ pub const MIN_H: i32 = 160;
 pub const MAX_W: i32 = 3840;
 pub const MAX_H: i32 = 2160;
 
+/// 图标边长的合法区间（DIP）。与主窗口 `Ctrl+滚轮` 的档位范围一致：
+/// 最小 16（再小认不出是什么），最大 256（再大图标位图就开始吃内存）。
+pub const MIN_ICON: u32 = 16;
+pub const MAX_ICON: u32 = 256;
+
+/// 图标边长的档位。**与主窗口 `App::step_icon_size` 必须是同一张表。**
+///
+/// 两处各写一份的后果不是立刻出错，而是"主窗口能调到 24、弹窗跳不到"这种
+/// 说不清的差异 —— 所以这里把它抽成常量，主窗口也引用它。
+pub const ICON_STEPS: &[u32] = &[16, 24, 32, 48, 64, 96, 128, 192, 256];
+
+/// 在档位表里走一格。`bigger` 为真就往大走。已经到顶/到底时返回 `None`。
+///
+/// `max` 是配置里的上限（`config.layout.icon_size_max`）。主窗口与弹窗
+/// 都调这一个函数，于是"能调到多大"这件事只有一处定义。
+pub fn step_icon(current: u32, bigger: bool, max: u32) -> Option<u32> {
+    let max = max.max(32);
+    if bigger {
+        ICON_STEPS.iter().copied().find(|&s| s > current && s <= max)
+    } else {
+        ICON_STEPS.iter().rev().copied().find(|&s| s < current)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 每个窗口的图标大小**互不干扰**（使用者 2026-10-20）。
+    ///
+    /// 这条守的是"弹窗调大小会波及主窗口/其它弹窗"那个 bug：
+    /// 现在每个窗口只读自己记录里的 `icon_size`，`0` 才回落到主窗口。
+    #[test]
+    fn icon_size_is_per_window() {
+        let mut a = PopoutWindow::default();
+        let mut b = PopoutWindow::default();
+        assert_eq!(a.effective_icon_size(64), 64, "没设过应当跟随主窗口");
+
+        a.icon_size = 128;
+        // A 自己设过 → 用自己那份；B 没设过 → 仍跟随主窗口。
+        assert_eq!(a.effective_icon_size(64), 128);
+        assert_eq!(b.effective_icon_size(64), 64, "别的窗口不该被波及");
+
+        // 主窗口改了大小：设过的不动，没设过的跟着走。
+        assert_eq!(a.effective_icon_size(32), 128, "设过的窗口不该被主窗口改动");
+        assert_eq!(b.effective_icon_size(32), 32);
+
+        b.icon_size = 16;
+        assert_eq!(b.effective_icon_size(32), 16);
+    }
+
+    /// `0` 必须能穿过 `normalize` —— 否则每个窗口一启动就"自己设过"，
+    /// 从此再也不跟随主窗口。
+    #[test]
+    fn normalize_preserves_follow_sentinel() {
+        let mut w = PopoutWindow::default();
+        w.icon_size = 0;
+        w.normalize();
+        assert_eq!(w.icon_size, 0, "0 是'跟随主窗口'，不能被夹成 16");
+
+        // 越界的真实值要收进合法区间
+        w.icon_size = 9999;
+        w.normalize();
+        assert_eq!(w.icon_size, MAX_ICON);
+        w.icon_size = 1;
+        w.normalize();
+        assert_eq!(w.icon_size, MIN_ICON);
+    }
+
+    /// 档位表：往上/往下都只走一格，到顶到底返回 `None`。
+    #[test]
+    fn step_icon_walks_the_table() {
+        assert_eq!(step_icon(64, true, 256), Some(96));
+        assert_eq!(step_icon(64, false, 256), Some(48));
+        assert_eq!(step_icon(16, false, 256), None, "已经最小");
+        assert_eq!(step_icon(256, true, 256), None, "已经最大");
+        // 上限小于当前档位时，往上走不动
+        assert_eq!(step_icon(64, true, 64), None);
+        // 上限不小于 32（与主窗口同一条夹紧）
+        assert_eq!(step_icon(24, true, 0), Some(32));
+    }
+}
+
 /// 一个弹出子窗口的状态。
 ///
 /// 字段全部 `pub`：这是纯粹的数据结构，读写都在 `window.rs` 里，
@@ -81,6 +164,40 @@ pub struct PopoutWindow {
     /// 只存一个基础色，整套配色仍由 `config::Scheme::from_base` 派生 ——
     /// 混色规则只该有一处定义（架构文档 §16 同理）。
     pub base_color: String,
+
+    /// 这个窗口**自己的**图标边长（DIP）。`0` = 还没有过，用主窗口的。
+    ///
+    /// # 为什么必须每个窗口一份（使用者 2026-10-20）
+    ///
+    /// > 把滚轮调节图标大小分开判断，每个窗口各自设定互不干扰。
+    ///
+    /// 原先弹窗的方格尺寸是**从主窗口推过来的**（`Content::icon_size`），
+    /// 于是在弹窗上 `Ctrl+滚轮` 会改主窗口、连带着改掉所有窗口。
+    ///
+    /// 用 `0` 当"没设过"的哨兵而不是 `Option<u32>`：`state.toml` 里少一层
+    /// 嵌套，而且 0 本来就不是合法的图标边长（最小 16），不会与真实值撞车。
+    /// 第一次在弹窗上滚轮时，以**当时主窗口的值**为起点，用户看到的是
+    /// "接着现在的大小继续调"，而不是突然跳回默认值。
+    pub icon_size: u32,
+}
+
+impl PopoutWindow {
+    /// 这个窗口该用的图标边长：自己设过就用自己那份，否则用主窗口的。
+    ///
+    /// 这是"谁优先"的**规范定义**。窗口层 `Popout` 手里只有
+    /// `own_icon_size: Option<u32>`（没有整个状态结构），所以它实现的是同一条
+    /// 规则的等价形式；`--selftest` 里有检查钉住两者一致。
+    ///
+    /// 生产路径上这个函数目前只有自检调用（窗口层走的是等价形式）——
+    /// 留着它是为了**把规则写在一个能脱离窗口测试的地方**。
+    #[allow(dead_code)]
+    pub fn effective_icon_size(&self, main_icon_size: i32) -> i32 {
+        if self.icon_size == 0 {
+            main_icon_size
+        } else {
+            self.icon_size as i32
+        }
+    }
 }
 
 /// 吸附方向。
@@ -106,6 +223,7 @@ impl Default for PopoutWindow {
             pinned: false,
             name: None,
             base_color: String::new(),
+            icon_size: 0,
         }
     }
 }
@@ -118,6 +236,12 @@ impl PopoutWindow {
     pub fn normalize(&mut self) {
         self.width = self.width.clamp(MIN_W, MAX_W);
         self.height = self.height.clamp(MIN_H, MAX_H);
+        // 图标边长与主窗口同一个合法区间。`0` 是"没设过"的哨兵，
+        // 不能被夹成 16 —— 那样每个窗口一启动就"自己设过"了，
+        // 从此再也不跟随主窗口。
+        if self.icon_size != 0 {
+            self.icon_size = self.icon_size.clamp(MIN_ICON, MAX_ICON);
+        }
         // **这里刻意没有"pinned 压过 docked"那条互斥。**
         //
         // 它当年成立的依据是"钉 = 常驻桌面层"（WorkerW），与"吸附在主窗口侧面"

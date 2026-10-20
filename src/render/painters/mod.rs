@@ -9,12 +9,14 @@ pub mod menu;
 pub mod panel;
 pub mod settings;
 pub mod sidebar;
+pub mod tooltip;
 
 pub use caption::CaptionPainter;
 pub use grid::GridPainter;
 pub use panel::PanelPainter;
 pub use settings::{SettingsItem, SettingsPainter};
 pub use sidebar::SidebarPainter;
+pub use tooltip::TooltipPainter;
 // 菜单类型不在这里 re-export：它还没接到 App 上，
 // 提前导出只会产生"未使用导入"的噪声。接线时按需要引入即可。
 
