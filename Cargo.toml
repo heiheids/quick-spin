@@ -1,6 +1,6 @@
 [package]
 name = "quick-spin"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "低内存、界面透明可调色的 Windows 快捷方式启动器（Direct2D 自绘）"
 # PolyForm Noncommercial 1.0.0：源码公开但禁止商用，**不是 OSI 意义上的开源**。
