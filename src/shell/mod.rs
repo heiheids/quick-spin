@@ -4,6 +4,7 @@
 //! 因此可以单独跑在后台线程里。
 
 pub mod com;
+pub mod drop_plan;
 pub mod launch;
 pub mod lnk;
 pub mod picker;

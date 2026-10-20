@@ -79,33 +79,30 @@ fn own_sources(dir: Option<std::path::PathBuf>) -> crate::config::model::Sources
     }
 }
 
-/// 把一个 `.lnk` 复制进程序目录。同名时自动加序号，不覆盖已有条目。
+/// 把一个**文件系统里的**东西放进程序目录，返回落盘的 `.lnk`。
 ///
-/// 直接覆盖会造成"拖了两次同一个快捷方式，第一条就没了"，
-/// 而用户显然期望两条并存（或至少不该丢东西）。
+/// 三种情况，都由 [`crate::shell::drop_plan::store`] 统一处理：
+///
+/// * 本身就是 `.lnk` → 原样**复制**（保留它内部的参数、工作目录、图标）
+/// * 其他文件 / 文件夹 / **可执行文件** → 建一个指向它的快捷方式
+/// * 壳命名空间项 → 不会走到这里（那条是 OLE 拖放目标的事）
+///
+/// 返回落盘的完整路径。
 fn copy_shortcut_in(
     src: &std::path::Path,
     dest_dir: &std::path::Path,
-) -> std::io::Result<std::path::PathBuf> {
+) -> crate::error::Result<std::path::PathBuf> {
     let stem = src
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "shortcut".into());
 
-    let mut dest = dest_dir.join(format!("{stem}.lnk"));
-    let mut n = 2;
-    while dest.exists() {
-        dest = dest_dir.join(format!("{stem} ({n}).lnk"));
-        n += 1;
-        // 极端情况下（同名几百个）仍不放弃，但加个上限避免死循环
-        if n > 999 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "同名快捷方式过多",
-            ));
-        }
-    }
-    std::fs::copy(src, &dest)?;
+    let dest = crate::shell::drop_plan::unique_dest(dest_dir, &stem);
+    crate::shell::drop_plan::store(
+        &dest,
+        &stem,
+        crate::shell::drop_plan::Source::File(src),
+    )?;
     Ok(dest)
 }
 
@@ -2588,13 +2585,18 @@ impl App {
         }
     }
 
-    /// 用户把文件拖进窗口。
-    ///
-    /// 按需求"拖入就复制一个快捷方式进来"：把 `.lnk` **复制**到程序自己的
-    /// `shortcuts` 目录，并在覆盖表里登记归当前选项卡。
+    /// 用户把文件拖进窗口（走老式的 `WM_DROPFILES`）。
     ///
     /// 复制而不是引用原路径，好处是原文件之后被移动/改名/删除都不影响本程序；
     /// 代价是磁盘上多一份几 KB 的 `.lnk`。
+    ///
+    /// **不再按扩展名过滤。** 原先这里只收 `.lnk`，注释写的是"拖进来一个 exe
+    /// 或图片并不是添加条目的意图"——但用户的实际意图恰恰就是那个:
+    /// **拖一个执行程序进来，就是要它的快捷方式**。于是拖 exe 被静默丢掉，
+    /// 表现为"拖进去没反应、也没报错"（这正是本条 bug 的起点）。
+    ///
+    /// 现在：`.lnk` 复制，其他文件/文件夹（含 `.exe`）建指向它的快捷方式。
+    /// 判定只有一份，见 [`crate::shell::drop_plan`] —— OLE 那条拖放路径用的是同一份。
     fn on_files_dropped(&mut self, paths: Vec<std::path::PathBuf>) -> bool {
         let dir = match paths::shortcuts_dir() {
             Ok(d) => d,
@@ -2609,25 +2611,22 @@ impl App {
         }
 
         // 落盘的路径先攒着，循环结束后统一登记归属。
-        // 归属规则只有一份（见 `assign_to_active_tab`），复制过程里不掺状态写入。
+        // 归属规则只有一份（见 `assign_to_active_tab`），落盘过程里不掺状态写入。
         let mut landed: Vec<std::path::PathBuf> = Vec::new();
         for src in &paths {
-            // 只收快捷方式。拖进来一个 exe 或图片并不是"添加条目"的意图，
-            // 静默忽略比自作主张地生成快捷方式更安全（后者会改动用户的文件布局）。
-            if !src
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
-            {
-                continue;
-            }
             match copy_shortcut_in(src, &dir) {
                 Ok(dest) => {
+                    diag(&format!(
+                        "拖入：{} → {}",
+                        src.display(),
+                        dest.display()
+                    ));
                     // 文件此刻已经躺在快捷方式目录里，所以可以立刻登记归属：
                     // 下面的 `rescan` 一定会收录它，`prune_overrides`
                     // 不会把这条件记录当孤儿清掉。
                     landed.push(dest);
                 }
-                Err(e) => eprintln!("复制快捷方式失败 [{}]: {e}", src.display()),
+                Err(e) => diag(&format!("拖入失败 [{}]: {e}", src.display())),
             }
         }
 
@@ -3430,6 +3429,16 @@ impl App {
                     } else {
                         label(&c)
                     };
+
+                    // 壳命名空间项（此电脑、回收站、控制面板…）没有文件系统
+                    // 位置，无处可定位。置灰并说明原因 —— 让它可点却什么都没发生，
+                    // 用户只会以为功能坏了。
+                    if matches!(c, OpenLocation)
+                        && target_key.as_deref().is_some_and(|k| !self.can_open_location(k))
+                    {
+                        return MenuItem::disabled(c, text, "没有所在位置");
+                    }
+
                     MenuItem::new(c, text)
                 }),
         );
@@ -3641,12 +3650,14 @@ impl App {
             MenuCommand::OpenLocation => {
                 // 只读操作，不写覆盖表
                 diag(&format!("OpenLocation 开始: {key}"));
-                if let Some(s) = self.state_path_shortcut(&key) {
-                    diag(&format!("OpenLocation: 已定位 {}", s.display()));
-                    if let Err(e) = crate::shell::launch::reveal(&s) {
+                if let Some(path) = self.open_location_path(&key) {
+                    diag(&format!("OpenLocation: 已定位 {}", path.display()));
+                    if let Err(e) = crate::shell::launch::reveal(&path) {
                         diag(&format!("OpenLocation: reveal 失败 {e}"));
                     }
                     diag("OpenLocation: reveal 已返回");
+                } else {
+                    diag("OpenLocation: 这条没有可定位的文件系统位置");
                 }
                 diag("OpenLocation 结束");
                 return true;
@@ -3721,12 +3732,22 @@ impl App {
         true
     }
 
-    /// 从覆盖表键反查 `Shortcut`。键就是 `.lnk` 路径，所以直接找。
-    fn state_path_shortcut(&self, key: &str) -> Option<std::path::PathBuf> {
-        (0..self.library.total())
+    /// "打开位置"应该定位到哪里 —— 见 [`crate::shell::lnk::Shortcut::location_to_reveal`]。
+    ///
+    /// 语义是**源文件本身**，不是 `shortcuts\` 里那份副本（使用者 2026-10-20 明确）。
+    /// 判断与降级都在那个方法里，这里只负责按键找出条目。
+    fn open_location_path(&self, key: &str) -> Option<std::path::PathBuf> {
+        let shortcut = (0..self.library.total())
             .filter_map(|i| self.library.get(i))
-            .find(|s| crate::model::library::path_key(s) == key)
-            .map(|s| s.lnk_path.clone())
+            .find(|s| crate::model::library::path_key(s) == key)?;
+        shortcut.location_to_reveal().map(|p| p.to_path_buf())
+    }
+
+    /// 这条条目有没有"所在位置"可定位。
+    ///
+    /// 菜单据此置灰并给出原因 —— 只置灰不给原因，用户会以为点了没反应。
+    fn can_open_location(&self, key: &str) -> bool {
+        self.open_location_path(key).is_some()
     }
 
     /// "添加"按钮的菜单：**就是这五项**（此电脑、回收站、控制面板、网络、电脑设置）。

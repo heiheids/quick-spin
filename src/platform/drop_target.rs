@@ -20,14 +20,13 @@
 //! 但**落盘的路径要攒下来**（见 [`take_dropped`]）：新条目该归到哪个选项卡
 //! 是界面状态，本模块看不到，只能由上层在收到消息后决定。
 //!
-//! 判定规则：
+//! 判定规则（与 `WM_DROPFILES` 那条**共用**，实现在 [`crate::shell::drop_plan`]）：
 //!
 //! * 本身是 `.lnk` → **原样复制**（保留它内部的参数/工作目录/图标设置）
-//! * 其他文件或文件夹 → 建一个指向它的快捷方式
-//! * 壳命名空间项（解析名以 `::` 开头）→ 建一个 `explorer.exe` +
-//!   该解析名为参数的快捷方式
+//! * 其他文件、文件夹、**可执行文件** → 建一个指向它的快捷方式
+//! * 壳命名空间项（`::{CLSID}` / `ms-settings:` / UWP AUMID）→ 用 PIDL 建快捷方式
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{HWND, POINTL};
@@ -333,70 +332,18 @@ unsafe fn name_of(pidl: *const ITEMIDLIST) -> Option<(String, String)> {
 ///
 /// 返回类型是本工程的 `Result`（`AppError`），不是 `windows::core::Result` ——
 /// 它要转发 `paths::shortcuts_dir()` 与文件系统操作的错误。
+///
+/// 判定与落盘都在 [`crate::shell::drop_plan`] 里，那边是**两条拖放路径共用**的：
+/// 本模块只负责从 PIDL 取名字，不重复实现"该建什么快捷方式"。
 fn store_one(display: &str, parsing: &str) -> crate::error::Result<PathBuf> {
     let dir = crate::paths::shortcuts_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let dest = unique_dest(&dir, display);
+    let dest = crate::shell::drop_plan::unique_dest(&dir, display);
 
-    // 壳命名空间项：解析名形如 `::{20D04FE0-3AEA-1069-A2D8-08002B30309D}`。
-    // 它没有文件路径，只能让 explorer 用这个解析名去打开。
-    if parsing.starts_with("::") {
-        crate::shell::lnk::create_shell_shortcut(&dest, parsing, display)?;
-        return Ok(dest);
-    }
+    // 是"文件系统里的东西"还是"壳命名空间项"？判定只有一份，
+    // 见 `shell::drop_plan::classify`（两条拖放路径共用）。
+    let source = crate::shell::drop_plan::classify(parsing);
 
-    let src = Path::new(parsing);
-    // 本身是快捷方式就原样复制：它内部可能带着参数、工作目录、自定义图标，
-    // 重建一个指向它目标的快捷方式会丢掉这些。
-    if src
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
-    {
-        std::fs::copy(src, &dest)?;
-        return Ok(dest);
-    }
-
-    // 普通文件或文件夹：建一个指向它的快捷方式
-    crate::shell::lnk::create_link(&dest, src, "", display)?;
+    crate::shell::drop_plan::store(&dest, display, source)?;
     Ok(dest)
-}
-
-/// 在同名文件已存在时另找一个名字，绝不覆盖。
-///
-/// 覆盖会让"拖了两次同一个东西"丢掉先前的条目。
-fn unique_dest(dir: &Path, display: &str) -> PathBuf {
-    let safe = sanitize(display);
-    let mut dest = dir.join(format!("{safe}.lnk"));
-    let mut n = 2;
-    while dest.exists() {
-        dest = dir.join(format!("{safe} ({n}).lnk"));
-        n += 1;
-        if n > 999 {
-            break;
-        }
-    }
-    dest
-}
-
-/// 把显示名里不能做文件名的字符换掉。
-///
-/// 壳项的显示名是本地化的自由文本，可能含 `\ / : * ? " < > |` 等，
-/// 直接当文件名会创建失败。
-fn sanitize(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let trimmed = cleaned.trim().trim_end_matches('.').to_string();
-    if trimmed.is_empty() {
-        "新条目".to_string()
-    } else {
-        trimmed
-    }
 }

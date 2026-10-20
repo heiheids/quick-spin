@@ -95,6 +95,39 @@ impl Shortcut {
     pub fn is_usable(&self) -> bool {
         !self.is_broken()
     }
+
+    /// "打开位置"该定位到哪里：**源文件本身**，不是我们目录里的那份副本。
+    ///
+    /// # 语义（使用者 2026-10-20 明确）
+    ///
+    /// > 打开位置是打开源文件位置，不是快捷方式位置。
+    ///
+    /// 程序里其实有**两份路径**，很容易搞混：
+    ///
+    /// * [`Self::lnk_path`] —— `shortcuts\<名字>.lnk`，拖进来时复制/生成的那份副本；
+    /// * [`Self::target`] —— 它指向的目标，用户真正的那个 exe / 文件夹 / 文档。
+    ///
+    /// 定位到副本对用户毫无用处：那个目录里全是我们自动生成的文件，名字还带
+    /// `(2)`、`(3)` 后缀，既不是他放程序的地方，也解释不了"这东西在哪"。
+    /// 用户点"打开位置"想问的永远是"我这个程序装在哪"。
+    ///
+    /// | 条目 | 定位到 |
+    /// |---|---|
+    /// | 普通条目 | 目标本身 |
+    /// | 目标已失效（U 盘拔了、程序卸载了） | 退回副本 `.lnk`，至少有个东西可选 |
+    /// | 壳命名空间项（此电脑、回收站…） | `None` —— 没有文件系统位置 |
+    pub fn location_to_reveal(&self) -> Option<&Path> {
+        if self.is_shell_item() {
+            return None;
+        }
+        if self.target.exists() {
+            Some(&self.target)
+        } else {
+            // 目标不在了还去定位它，explorer 只会打开一个空目录或者干脆
+            // 退回默认位置。退回副本至少能让用户看见"这一条还在"。
+            Some(&self.lnk_path)
+        }
+    }
 }
 
 /// 可复用的 `.lnk` 解析器。
@@ -192,11 +225,70 @@ pub fn create_shell_shortcut(dest: &Path, parsing_name: &str, description: &str)
 /// 创建一个指向**文件或文件夹**的快捷方式。
 ///
 /// 调用前必须已初始化 COM。
+///
+/// # 工作目录必须给，不能留空
+///
+/// `.lnk` 的"起始位置"为空时，**被启动的进程继承启动器自己的目录**。
+/// 实测：程序在 `E:\工程-快启桌面管理\target\release\`，给它拖一个
+/// `cmd.exe` 进去、在快捷方式里跑 `cd`，打印出来的就是这个目录。
+///
+/// 症状不是"打不开"，而是"打开了但用不了"：程序按相对路径找自己的
+/// 配置、资源、依赖 DLL 时全部落空 —— 有的直接退出，有的只弹一个
+/// 看不清的错误框。用户只会说"拖进来的程序起不来"。
+///
+/// 所以这里默认取目标自己的目录（也是资源管理器建快捷方式时的默认值）；
+/// 目标没有父目录（如 `E:\`）时才留空。
 pub fn create_link(dest: &Path, target: &Path, args: &str, description: &str) -> Result<()> {
+    create_link_with_dir(dest, target, args, default_work_dir(target), description)
+}
+
+/// 快捷方式的默认"起始位置"：目标自身所在目录。
+///
+/// 指目录时取它**自己**而不是父目录：双击一个指向 `D:\游戏` 的快捷方式，
+/// 期望的起始位置是 `D:\游戏`，而不是 `D:\`。
+///
+/// 非文件系统目标（网址、协议）返回空：给 `https://example.com` 推导"父目录"
+/// 会拼出一个毫无意义的字符串，反而会污染快捷方式。
+fn default_work_dir(target: &Path) -> &Path {
+    if !is_file_target(target) {
+        return Path::new("");
+    }
+    if target.is_dir() {
+        target
+    } else {
+        target.parent().unwrap_or_else(|| Path::new(""))
+    }
+}
+
+/// 目标看起来是个文件系统路径吗（而不是网址 / 协议 / 壳项）。
+///
+/// 判据用绝对路径或盘符：`https://x` 在 Windows 上既不是绝对路径也没有盘符
+///（冒号后在 `//` 之前），而 `C:\...`、`\\server\share` 都是。
+fn is_file_target(target: &Path) -> bool {
+    target.is_absolute() || target.to_string_lossy().contains('\\')
+}
+
+/// 同 [`create_link`]，但显式指定"起始位置"。
+///
+/// 单独一个函数而不是给 [`create_link`] 加参数：绝大多数调用方要的都是
+/// "目标所在目录"（[`default_work_dir`]），只有需要精确控制的少数场合
+/// 才直接用它。
+pub fn create_link_with_dir(
+    dest: &Path,
+    target: &Path,
+    args: &str,
+    work_dir: &Path,
+    description: &str,
+) -> Result<()> {
     let target_wide = to_wide(target)?;
     let args_wide = text_to_wide(args);
     let desc_wide = text_to_wide(description);
     let file_wide = to_wide(dest)?;
+    let dir_wide = if work_dir.as_os_str().is_empty() {
+        None
+    } else {
+        Some(to_wide(work_dir)?)
+    };
 
     // SAFETY: 调用方保证 COM 已初始化；所有宽字符串都在本函数内存活到调用结束。
     unsafe {
@@ -214,7 +306,11 @@ pub fn create_link(dest: &Path, target: &Path, args: &str, description: &str) ->
             link.SetDescription(PCWSTR(desc_wide.as_ptr()))
                 .ctx("IShellLink::SetDescription")?;
         }
-        // 工作目录留空：指向文件夹时填它反而会让快捷方式的"起始位置"怪异。
+        // 见函数说明：留空会让被启动的程序继承**本程序**的目录。
+        if let Some(dir) = &dir_wide {
+            link.SetWorkingDirectory(PCWSTR(dir.as_ptr()))
+                .ctx("IShellLink::SetWorkingDirectory")?;
+        }
 
         let persist: IPersistFile = link.cast().ctx("IShellLinkW -> IPersistFile")?;
         // 第二个参数 TRUE = 记住路径并写进文件。传 FALSE 会让 `.lnk` 不落盘。
@@ -352,4 +448,63 @@ fn to_wide(path: &Path) -> Result<Vec<u16>> {
 fn take_string(buf: &[u16]) -> String {
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 造一条只关心路径的 `Shortcut`。
+    fn sc(lnk: &str, target: &str) -> Shortcut {
+        Shortcut {
+            lnk_path: PathBuf::from(lnk),
+            origin: Origin::Extra,
+            name: "测试".into(),
+            target: PathBuf::from(target),
+            args: String::new(),
+            work_dir: PathBuf::new(),
+            description: String::new(),
+            shell_name: None,
+        }
+    }
+
+    /// "打开位置"必须定位**源文件**，而不是 `shortcuts\` 里那份副本。
+    ///
+    /// 使用者 2026-10-20 的原话：「打开位置是打开源文件位置，不是快捷方式位置」。
+    /// 这条是回归锁：改成定位副本的话，用户点开只会看到我们自动生成的
+    /// `xxx (2).lnk`，完全不是他想要的"这东西装在哪"。
+    #[test]
+    fn location_points_at_source_not_at_copy() {
+        // notepad.exe 每台机器上都有，用它当"仍然存在的源文件"
+        let source = r"C:\Windows\System32\notepad.exe";
+        let s = sc(r"D:\app\shortcuts\记事本.lnk", source);
+
+        assert_eq!(
+            s.location_to_reveal(),
+            Some(Path::new(source)),
+            "必须定位源文件，不能是 shortcuts 里的副本"
+        );
+    }
+
+    /// 源文件已经不在了，退回副本 —— 至少有个东西可以选中。
+    #[test]
+    fn location_falls_back_to_copy_when_source_is_gone() {
+        let copy = r"D:\app\shortcuts\已卸载的程序.lnk";
+        let s = sc(copy, r"C:\__这条路径并不存在__\gone.exe");
+
+        assert_eq!(
+            s.location_to_reveal(),
+            Some(Path::new(copy)),
+            "源文件没了应当退回副本"
+        );
+    }
+
+    /// 壳命名空间项没有文件系统位置，不该假装能定位。
+    #[test]
+    fn location_is_none_for_shell_items() {
+        let mut s = sc(r"D:\app\shortcuts\此电脑.lnk", "");
+        s.shell_name = Some("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".into());
+
+        assert_eq!(s.location_to_reveal(), None, "壳项没有所在位置");
+    }
 }
